@@ -7,10 +7,14 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
+
+	"github.com/gocolly/colly"
 )
 
 func main() {
 	client := &http.Client{}
+	collector := colly.NewCollector()
 	companyName := "KPMG"
 	params := url.Values{}
 	params.Add("SearchFrom", "CnSearch")
@@ -50,6 +54,17 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("%s\n", bodyText)
+
+	collector.OnHTML("a[href]", func(e *colly.HTMLElement) {
+		url := e.Attr("href")
+		if strings.Contains(url, "SupplierName="+companyName) {
+			fmt.Printf(url)
+			// Visit all search bread crumbs
+			e.Request.Visit(url)
+		}
+	})
+
+	collector.Visit(requestURL)
 }
 
 // TODO: Create contract class and return a list
