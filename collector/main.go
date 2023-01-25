@@ -1,7 +1,7 @@
 package main
 
 import (
-	"container/list"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/gocolly/colly"
+	"github.com/leekchan/accounting"
+	"github.com/shopspring/decimal"
 )
 
 // Fields
@@ -31,14 +33,21 @@ type contract struct {
 	Publish_Date    string
 	Category        string
 	Contract_Period string
-	Contract_Value  string
+	Contract_Value  decimal.Decimal
 	ATM_ID          string
 	Supplier_Name   string
 }
 
 func main() {
+	company := flag.String("c", "KPMG", "Company to scan in Austender")
+	flag.Parse()
+
+	companyName := *company
+
 	collector := colly.NewCollector()
-	companyName := "KPMG"
+	contracts := []*contract{}
+	ac := accounting.Accounting{Symbol: "$", Precision: 2}
+	contractSum := decimal.New(0, 0)
 	params := url.Values{}
 	params.Add("SearchFrom", "CnSearch")
 	params.Add("Type", "Cn")
@@ -75,17 +84,24 @@ func main() {
 			case "Contract Period:":
 				c.Contract_Period = el.ChildText(".list-desc-inner")
 			case "Contract Value (AUD):":
-				c.Contract_Value = el.ChildText(".list-desc-inner")
+				c_value_str := el.ChildText(".list-desc-inner")
+				c_decimal_str := accounting.UnformatNumber(c_value_str, 2, "AUD")
+				c.Contract_Value, _ = decimal.NewFromString(c_decimal_str)
 			case "ATM ID:":
 				c.ATM_ID = el.ChildText(".list-desc-inner")
 			case "Supplier Name:":
 				c.Supplier_Name = el.ChildText(".list-desc-inner")
 			}
 		})
-		fmt.Printf(c.Contract_Value)
+		contracts = append(contracts, c)
 	})
 
 	collector.Visit(requestURL)
+	for _, c := range contracts {
+		contractSum = contractSum.Add(c.Contract_Value)
+	}
+	sumValue := ac.FormatMoney(contractSum)
+	fmt.Println("Total Contract:" + sumValue)
 }
 
 func initialLoad(requestURL string) {
@@ -119,24 +135,11 @@ func initialLoad(requestURL string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// TODO: Parse body for total result count using goquery on text directly
 	fmt.Printf("%s\n", bodyText)
-}
-
-// TODO: Create contract class and return a list
-// of contracts/tenders per page
-func summarizePage(s string) *list.List {
-	l := list.New()
-	return l
 }
 
 // TODO: Parse first page and return page counts to parse
 func countResultPages(s string) int {
 	return 1
-}
-
-// TODO: Summarize spends from list of contracts over time
-// to 3 buckets last year, last 5 years, all time
-func summarizeSpend(map[string]string) *list.List {
-	l := list.New()
-	return l
 }
