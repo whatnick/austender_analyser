@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/gocolly/colly"
@@ -85,15 +86,17 @@ func main() {
 				c.Contract_Period = el.ChildText(".list-desc-inner")
 			case "Contract Value (AUD):":
 				c_value_str := el.ChildText(".list-desc-inner")
-				c_decimal_str := accounting.UnformatNumber(c_value_str, 2, "AUD")
-				c.Contract_Value, _ = decimal.NewFromString(c_decimal_str)
+				c.Contract_Value = cleanNum(c_value_str)
 			case "ATM ID:":
 				c.ATM_ID = el.ChildText(".list-desc-inner")
 			case "Supplier Name:":
 				c.Supplier_Name = el.ChildText(".list-desc-inner")
 			}
 		})
-		contracts = append(contracts, c)
+		if c.Contract_Value.GreaterThan(contractSum) {
+			fmt.Println(c)
+			contracts = append(contracts, c)
+		}
 	})
 
 	collector.Visit(requestURL)
@@ -137,6 +140,14 @@ func initialLoad(requestURL string) {
 	}
 	// TODO: Parse body for total result count using goquery on text directly
 	fmt.Printf("%s\n", bodyText)
+}
+
+func cleanNum(s string) decimal.Decimal {
+	r := regexp.MustCompile(`[^0-9-. ]`) // Remove anything thats not a number,space or decimal
+	num := r.ReplaceAllString(s, "${1}")
+	num = strings.Trim(num, " ")
+	v, _ := decimal.NewFromString(num)
+	return v
 }
 
 // TODO: Parse first page and return page counts to parse
