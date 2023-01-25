@@ -45,7 +45,7 @@ func main() {
 
 	companyName := *company
 
-	collector := colly.NewCollector()
+	collector := colly.NewCollector(colly.Async(true))
 	contracts := []*contract{}
 	ac := accounting.Accounting{Symbol: "$", Precision: 2}
 	contractSum := decimal.New(0, 0)
@@ -100,6 +100,7 @@ func main() {
 	})
 
 	collector.Visit(requestURL)
+	collector.Wait()
 	for _, c := range contracts {
 		contractSum = contractSum.Add(c.Contract_Value)
 	}
