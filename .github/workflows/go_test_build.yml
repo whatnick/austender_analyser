@@ -16,10 +16,7 @@ jobs:
         uses: actions/setup-go@v3
         with:
           go-version: 1.19
-      - name: Build
-        - run: cd collector
-        - run: go build -v ./...
-
+      - name: Install dependencies
+        run: cd collector; go get .
       - name: Test
-        - run: cd collector
-        - run: go test -v ./...
+        run: cd collector; go test -cover
