@@ -1,6 +1,9 @@
 name: Go package
 
-on: [push]
+on: 
+  push:
+    paths:
+      - collector
 
 jobs:
   build:
