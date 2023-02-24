@@ -100,9 +100,8 @@ func main() {
 			}
 		})
 		if c.Contract_Value.GreaterThan(decimal.New(0, 0)) {
-			fmt.Println(c)
 			if strings.Contains(c.Agency, agencyVal) {
-				fmt.Println(strings.Index(c.Agency, agencyVal))
+				fmt.Println(c)
 				contracts = append(contracts, c)
 			}
 		}
