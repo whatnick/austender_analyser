@@ -40,10 +40,15 @@ type contract struct {
 }
 
 func main() {
-	company := flag.String("c", "KPMG", "Company to scan in Austender")
+	company := flag.String("c", "", "Company to scan")
+	department := flag.String("d", "", "Department to scan")
+	keyword := flag.String("k", "", "Keywords to scan")
+
 	flag.Parse()
 
 	companyName := *company
+	keywordVal := *keyword
+	agencyVal := *department
 
 	collector := colly.NewCollector(colly.Async(true))
 	contracts := []*contract{}
@@ -55,6 +60,7 @@ func main() {
 	params.Add("AgencyStatus", "-1")
 	params.Add("KeywordTypeSearch", "AllWord")
 	params.Add("DateType", "Publish Date")
+	params.Add("Keyword", keywordVal)
 	params.Add("SupplierName", companyName)
 	requestURL := "https://www.tenders.gov.au/Search/CnAdvancedSearch?" + params.Encode()
 
@@ -93,9 +99,12 @@ func main() {
 				c.Supplier_Name = el.ChildText(".list-desc-inner")
 			}
 		})
-		if c.Contract_Value.GreaterThan(contractSum) {
+		if c.Contract_Value.GreaterThan(decimal.New(0, 0)) {
 			fmt.Println(c)
-			contracts = append(contracts, c)
+			if strings.Contains(c.Agency, agencyVal) {
+				fmt.Println(strings.Index(c.Agency, agencyVal))
+				contracts = append(contracts, c)
+			}
 		}
 	})
 
