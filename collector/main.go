@@ -36,6 +36,7 @@ type contract struct {
 	Contract_Period string
 	Contract_Value  decimal.Decimal
 	ATM_ID          string
+	SON_ID          string
 	Supplier_Name   string
 }
 
@@ -95,6 +96,8 @@ func main() {
 				c.Contract_Value = cleanNum(c_value_str)
 			case "ATM ID:":
 				c.ATM_ID = el.ChildText(".list-desc-inner")
+			case "SON ID":
+				c.SON_ID = el.ChildText(".list-desc-inner")
 			case "Supplier Name:":
 				c.Supplier_Name = el.ChildText(".list-desc-inner")
 			}
