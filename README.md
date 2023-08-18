@@ -11,10 +11,10 @@ Set this up as a serverless go development project to answer spend questions by 
 - CLI tool that scrapes for a keyword and returns roll-ups
 - Standard 3-tier design (BE,FE,DB)
 - Backend implementation in Golang
-- Frontend implementation in Angular/React TBD
+- Frontend implementation in Angular/React/HTMX TBD
 - Fuzzy name matching in Google "did you mean" style
 - Temporal aggregate spend on raw AUD values, not inflation adjusted (I am not an economist)
-- Serverless hosting in AWS
+- Serverless hosting in AWS/Fly.io
 - DynamoDB cache of Austender data downloadable as CSV
 
 
