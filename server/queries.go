@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
+	"database/sql"
 	"fmt"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
+	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/google/uuid"
 )
 
@@ -34,7 +36,14 @@ const (
 	Error                = "error"
 )
 
-func GetClickConn() {
+func (q *Query) Run(ctx context.Context) error {
+	return nil
+}
+
+func (q *Query) Cancel(at time.Time) {
+}
+
+func GetClickConn() (*sql.DB, error) {
 	conn := clickhouse.OpenDB(&clickhouse.Options{
 		Addr: []string{"127.0.0.1:9999"},
 		Auth: clickhouse.Auth{
@@ -51,6 +60,7 @@ func GetClickConn() {
 		DialTimeout: time.Second * 30,
 		Compression: &clickhouse.Compression{
 			clickhouse.CompressionLZ4,
+			0, // optional, parameter
 		},
 		Debug:                true,
 		BlockBufferSize:      10,
@@ -60,17 +70,19 @@ func GetClickConn() {
 				Name    string
 				Version string
 			}{
-				{Name: "my-app", Version: "0.1"},
+				{Name: "ancap-client", Version: "0.1"},
 			},
 		},
 	})
 	conn.SetMaxIdleConns(5)
 	conn.SetMaxOpenConns(10)
 	conn.SetConnMaxLifetime(time.Hour)
+
+	return conn, nil
 }
 
 func QueryRows() error {
-	conn, err := GetStdOpenDBConnection(clickhouse.Native, nil, nil, nil)
+	conn, err := GetClickConn()
 	if err != nil {
 		return err
 	}

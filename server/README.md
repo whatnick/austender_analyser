@@ -1,6 +1,6 @@
 # REST API for data
 - Rollups
-- All data download
+- All data downloaded and streamed in from collector
 - HTMX Reactive frontend from templates
 - Use clickhouse OLAP to run column aggregations over data
     - Use [tutorial](https://github.com/jneo8/clickhouse-setup) to setup

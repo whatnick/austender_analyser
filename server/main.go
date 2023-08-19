@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/donseba/go-htmx"
-	"github.com/labstack/echo/v4"
+	echo "github.com/labstack/echo/v4"
 	echoMiddleware "github.com/labstack/echo/v4/middleware"
 	"golang.org/x/net/websocket"
 )
