@@ -17,14 +17,15 @@ type Query struct {
 	sync.Mutex
 	cancel func()
 
-	ID       uint16      `json:"id" form:"id" param:"id" query:"id"`
-	DB       string      `json:"db" form:"db"`
-	Sql      string      `json:"sql" form:"sql"`
-	Status   QueryStatus `json:"status"`
-	Results  string      `json:"results"`
-	Error    error
-	Started  time.Time     `json:"started"`
-	Duration time.Duration `json:"duration" form:"duration"`
+	ID         uint16      `json:"id" form:"id" param:"id" query:"id"`
+	Company    string      `json:"company" form:"company"`
+	Department string      `json:"department" form:"department"`
+	Keyword    string      `json:"keyword" form:"keyword"`
+	Status     QueryStatus `json:"status"`
+	Results    string      `json:"results"`
+	Error      error
+	Started    time.Time     `json:"started"`
+	Duration   time.Duration `json:"duration" form:"duration"`
 }
 
 type QueryStatus string
@@ -70,7 +71,7 @@ func GetClickConn() (*sql.DB, error) {
 				Name    string
 				Version string
 			}{
-				{Name: "ancap-client", Version: "0.1"},
+				{Name: "austender-client", Version: "0.1"},
 			},
 		},
 	})

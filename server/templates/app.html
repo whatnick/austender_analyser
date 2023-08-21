@@ -1,8 +1,9 @@
 <div id="app">
     <form hx-post="/run" hx-target="#app" hx-trigger="submit" style="height: 20%;">
         <div style="color: red;">{{.Error}}</div>
-        <input name="db" type="text" value="{{.DB}}" placeholder="DSN" /><br>
-        <input name="sql" type="textarea" value="{{.Sql}}" placeholder="query" rows="5" cols="100" style="width: 50%; height: 20%" /><br>
+        <input name="company" type="text" value="{{.Company}}" placeholder="Company" /><br>
+        <input name="department" type="text" value="{{.Department}}" placeholder="Department" /><br>
+        <input name="keyword" type="text" value="{{.Keyword}}" placeholder="Keyword" /><br>
         <button type="submit">Run</button>
     </form>
 </div>

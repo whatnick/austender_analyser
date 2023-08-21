@@ -69,10 +69,11 @@ func (a *App) RunQuery(c echo.Context) error {
 		Started: time.Now(),
 	}
 	if err := c.Bind(q); err != nil {
-		a.state.Sql = q.Sql
+		a.state.Company = q.Company
+		a.state.Department = q.Department
+		a.state.Keyword = q.Keyword
 		a.state.Error = "unable to parse request"
 	} else {
-		a.state.DB = q.DB
 		q.Run(context.Background())
 	}
 
@@ -163,8 +164,9 @@ func HtmxMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 }
 
 type State struct {
-	DB      string   `form:"db"`
-	Sql     string   `json:"sql" form:"sql"`
-	Error   string   `json:"error" form:"error"`
-	Queries []*Query `json:"queries" form:"queries"`
+	Company    string   `form:"company"`
+	Department string   `json:"sql" form:"sql"`
+	Keyword    string   `json:"keyword" form:"keyword"`
+	Error      string   `json:"error" form:"error"`
+	Queries    []*Query `json:"queries" form:"queries"`
 }
