@@ -1,7 +1,11 @@
-# REST API for data
+# REST API/Frontend for data
 - Rollups
 - All data downloaded and streamed in from collector
 - HTMX Reactive frontend from templates
 - Use clickhouse OLAP to run column aggregations over data
     - Use [tutorial](https://github.com/jneo8/clickhouse-setup) to setup
     - Use [basic tutorial](https://pingbin.com/2021/11/quickly-deploy-clickhouse-docker-server/)
+- Run clickhouse local `docker-compose up -d`
+- Create a clickhouse client ` docker-compose exec click_server clickhouse-client`
+- Send in some data from `bootstrap.sql`
+- Sort out how to do TLS and connect, currently SSL is turned off.

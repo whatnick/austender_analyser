@@ -21,6 +21,7 @@ INSERT INTO contracts VALUES (
     'Information technology consultation services',
     768856.24,
     '17-Aug-2020 to 30-Jun-2022',
+    '',
     'SON3622041',
     'PricewaterhouseCoopers'
 );
