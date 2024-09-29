@@ -9,6 +9,7 @@ Set this up as a serverless go development project to answer spend questions by 
 
 ## Features
 - CLI tool that scrapes for a keyword and returns roll-ups
+- Cobra params parsing
 - Standard 3-tier design (BE,FE,DB)
 - Backend implementation in Golang
 - Frontend implementation in Angular/React/HTMX TBD
@@ -21,7 +22,7 @@ Set this up as a serverless go development project to answer spend questions by 
 ## Roadmap
 - Download one search result - KPMG
 - Identify fields to cache from Austender
-- Cron to download and populate dynamodb with Austender info
+- Cron to download and populate dynamodb/clickhouse with Austender info
 - Webserver API to serve 1 set results
     - total spend on org all time
     - last 5 years
