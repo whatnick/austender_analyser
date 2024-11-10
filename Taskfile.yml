@@ -1,0 +1,25 @@
+# https://taskfile.dev
+
+version: '3'
+
+env:
+  AWS_DEFAULT_REGION: ap-southeast-1
+  CDK_DEFAULT_REGION: ap-southeast-1
+  CDK_DEFAULT_ACCOUNT: 
+    sh: aws sts get-caller-identity --query Account --output text
+
+
+includes:
+  server:
+    taskfile: ./server/Taskfile.yml
+    dir: ./server
+  infra:
+    taskfile: ./infra/Taskfile.yml
+    dir: ./infra
+  collector:
+    taskfile: ./collector/Taskfile.yml
+    dir: ./collector
+tasks:
+
+
+ 
