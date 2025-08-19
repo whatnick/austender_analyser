@@ -36,15 +36,10 @@ type contract struct {
 	Supplier_Name   string
 }
 
-func cleanNum(s string) decimal.Decimal {
-	r := regexp.MustCompile(`[^0-9-. ]`) // Remove anything thats not a number,space or decimal
-	num := r.ReplaceAllString(s, "${1}")
-	num = strings.Trim(num, " ")
-	v, _ := decimal.NewFromString(num)
-	return v
-}
-
-func scrapeAncap(keywordVal, companyName, agencyVal string) {
+// RunScrape runs the Austender scrape for the given parameters and returns the
+// formatted total contract value (e.g., "$542,560.00").
+// Note: This executes network requests to Austender.
+func RunScrape(keywordVal, companyName, agencyVal string) (string, error) {
 	collector := colly.NewCollector(colly.Async(true))
 	contracts := []*contract{}
 	ac := accounting.Accounting{Symbol: "$", Precision: 2}
@@ -62,8 +57,6 @@ func scrapeAncap(keywordVal, companyName, agencyVal string) {
 	collector.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		url := e.Attr("href")
 		if strings.Contains(url, "SupplierName="+companyName) {
-			//fmt.Printf(url)
-			// Visit all search bread crumbs
 			e.Request.Visit(url)
 		}
 	})
@@ -95,17 +88,35 @@ func scrapeAncap(keywordVal, companyName, agencyVal string) {
 		})
 		if c.Contract_Value.GreaterThan(decimal.New(0, 0)) {
 			if strings.Contains(c.Agency, agencyVal) {
-				fmt.Println(c)
 				contracts = append(contracts, c)
 			}
 		}
 	})
 
-	collector.Visit(requestURL)
+	if err := collector.Visit(requestURL); err != nil {
+		return "", err
+	}
 	collector.Wait()
 	for _, c := range contracts {
 		contractSum = contractSum.Add(c.Contract_Value)
 	}
 	sumValue := ac.FormatMoney(contractSum)
+	return sumValue, nil
+}
+
+func cleanNum(s string) decimal.Decimal {
+	r := regexp.MustCompile(`[^0-9-. ]`) // Remove anything thats not a number,space or decimal
+	num := r.ReplaceAllString(s, "${1}")
+	num = strings.Trim(num, " ")
+	v, _ := decimal.NewFromString(num)
+	return v
+}
+
+func scrapeAncap(keywordVal, companyName, agencyVal string) {
+	sumValue, err := RunScrape(keywordVal, companyName, agencyVal)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 	fmt.Println("Total Contract:" + sumValue)
 }
