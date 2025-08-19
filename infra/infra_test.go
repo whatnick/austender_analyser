@@ -1,26 +1,38 @@
 package main
 
-// import (
-// 	"testing"
+import (
+	"testing"
 
-// 	"github.com/aws/aws-cdk-go/awscdk/v2"
-// 	"github.com/aws/aws-cdk-go/awscdk/v2/assertions"
-// 	"github.com/aws/jsii-runtime-go"
-// )
+	"github.com/aws/aws-cdk-go/awscdk/v2"
+	"github.com/aws/aws-cdk-go/awscdk/v2/assertions"
+	"github.com/aws/jsii-runtime-go"
+)
 
-// example tests. To run these tests, uncomment this file along with the
-// example resource in infra_test.go
-// func TestInfraStack(t *testing.T) {
-// 	// GIVEN
-// 	app := awscdk.NewApp(nil)
+func TestInfra_ContainsCloudFrontAndS3OriginWithOAC(t *testing.T) {
+	app := awscdk.NewApp(nil)
+	stack := NewInfraStack(app, "TestInfra", nil)
+	template := assertions.Template_FromStack(stack, nil)
 
-// 	// WHEN
-// 	stack := NewInfraStack(app, "MyStack", nil)
+	// S3 Bucket exists with BlockPublicAcls and BucketOwnerEnforced
+	template.HasResourceProperties(jsii.String("AWS::S3::Bucket"), map[string]interface{}{
+		"OwnershipControls": map[string]interface{}{
+			"Rules": []interface{}{
+				map[string]interface{}{
+					"ObjectOwnership": "BucketOwnerEnforced",
+				},
+			},
+		},
+		"PublicAccessBlockConfiguration": map[string]interface{}{
+			"BlockPublicAcls":  true,
+			"BlockPublicPolicy": true,
+			"IgnorePublicAcls": true,
+			"RestrictPublicBuckets": true,
+		},
+	})
 
-// 	// THEN
-// 	template := assertions.Template_FromStack(stack, nil)
+	// CloudFront Distribution exists
+	template.ResourceCountIs(jsii.String("AWS::CloudFront::Distribution"), jsii.Number(1))
 
-// 	template.HasResourceProperties(jsii.String("AWS::SQS::Queue"), map[string]interface{}{
-// 		"VisibilityTimeout": 300,
-// 	})
-// }
+	// OAC is created (when using S3BucketOrigin.withOriginAccessControl)
+	template.ResourceCountIs(jsii.String("AWS::CloudFront::OriginAccessControl"), jsii.Number(1))
+}
