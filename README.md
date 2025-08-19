@@ -29,3 +29,31 @@ Set this up as a serverless go development project to answer spend questions by 
     - last year
 - TDD
 - Go project layout as it matures : https://github.com/golang-standards/project-layout
+
+## Folder Structure
+
+The repository is organized as follows:
+
+- `collector/` - Go CLI tool for scraping Austender data. Contains main logic and command utilities.
+    - `cmd/` - Cobra command implementations and scraping utilities.
+    - `main.go` - Entry point for the CLI tool.
+    - `go.mod`, `go.sum` - Go module files.
+    - `README.md` - Collector-specific documentation.
+- `docs/` - Documentation and result images.
+    - `KPMG_contracts_flood.png`, `KPMG_result_2023_01_22.png` - Example result images.
+    - `README.md` - Documentation for the project.
+- `infra/` - Infrastructure as code for deployment (e.g., AWS CDK).
+    - `infra.go`, `infra_test.go` - Go code for infrastructure.
+    - `cdk.json`, `cdk.out/` - CDK configuration and output files.
+    - `go.mod`, `go.sum` - Go module files for infra.
+    - `README.md` - Infra-specific documentation.
+- `query/` - Reserved for query logic and documentation.
+    - `README.md` - Query documentation.
+- `server/` - Backend server implementation in Go.
+    - `main.go`, `main_test.go` - Server entry point and tests.
+    - `Taskfile.yml` - Task automation for server.
+    - `go.mod`, `go.sum` - Go module files for server.
+
+Other files:
+- `LICENSE.md` - License information.
+- `Taskfile.yml` - Project-wide task automation.

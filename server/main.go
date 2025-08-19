@@ -3,23 +3,35 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"os"
 
-	//begin import
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	//end import
 )
 
-// begin function
 type MyEvent struct {
 	Company string `json:"name"`
 }
 
-func HandleRequest(ctx context.Context, name MyEvent) (string, error) {
-	return fmt.Sprintf("Total spending on company %s!", name.Company), nil
+// Lambda handler for API Gateway
+func HandleLambdaRequest(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	keyword := req.QueryStringParameters["keyword"]
+	// Simulate calling collector (replace with actual logic)
+	result := fmt.Sprintf("Total spending on company %s!", keyword)
+	return events.APIGatewayProxyResponse{
+		StatusCode: 200,
+		Body:       result,
+	}, nil
 }
 
 func main() {
-	lambda.Start(HandleRequest)
+	mode := os.Getenv("AUSTENDER_MODE")
+	if mode == "lambda" {
+		lambda.Start(HandleLambdaRequest)
+	} else {
+		RegisterHandlers()
+		fmt.Println("Server running on :8080")
+		http.ListenAndServe(":8080", nil)
+	}
 }
-
-//end function
