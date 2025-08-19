@@ -24,10 +24,10 @@ func HandleLambdaRequest(ctx context.Context, req events.APIGatewayProxyRequest)
 
 	if keyword == "" && req.Body != "" {
 		var body struct {
-			Keyword string `json:"keyword"`
-			Company string `json:"company"`
+			Keyword     string `json:"keyword"`
+			Company     string `json:"company"`
 			CompanyName string `json:"companyName"`
-			Agency  string `json:"agency"`
+			Agency      string `json:"agency"`
 		}
 		// Ignore JSON errors and keep defaults if body isn't valid JSON
 		_ = json.Unmarshal([]byte(req.Body), &body)

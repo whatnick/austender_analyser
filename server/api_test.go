@@ -9,10 +9,10 @@ import (
 )
 
 type reqBody struct {
-	Keyword string `json:"keyword"`
-	Company string `json:"company,omitempty"`
+	Keyword     string `json:"keyword"`
+	Company     string `json:"company,omitempty"`
 	CompanyName string `json:"companyName,omitempty"`
-	Agency  string `json:"agency,omitempty"`
+	Agency      string `json:"agency,omitempty"`
 }
 
 func TestScrapeHandler_OK(t *testing.T) {
