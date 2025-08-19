@@ -20,6 +20,25 @@ includes:
     taskfile: ./collector/Taskfile.yml
     dir: ./collector
 tasks:
+  run:server:
+    desc: Run the local API server on :8080
+    cmds:
+      - bash ./hack/run-server.sh
+
+  run:frontend:
+    desc: Open the minimal HTMX frontend
+    cmds:
+      - bash ./hack/run-frontend.sh
+
+  run:local:
+    desc: Start server and open frontend
+    cmds:
+      - bash ./hack/run-local.sh
+
+  test:all:
+    desc: Run tests across collector, server, and infra
+    cmds:
+      - bash ./hack/test-all.sh
 
 
  
