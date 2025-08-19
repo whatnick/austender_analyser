@@ -23,9 +23,9 @@ func TestInfra_ContainsCloudFrontAndS3OriginWithOAC(t *testing.T) {
 			},
 		},
 		"PublicAccessBlockConfiguration": map[string]interface{}{
-			"BlockPublicAcls":  true,
-			"BlockPublicPolicy": true,
-			"IgnorePublicAcls": true,
+			"BlockPublicAcls":       true,
+			"BlockPublicPolicy":     true,
+			"IgnorePublicAcls":      true,
 			"RestrictPublicBuckets": true,
 		},
 	})
