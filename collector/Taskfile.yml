@@ -17,8 +17,9 @@ tasks:
     desc: Run the collector CLI (pass flags after --)
     cmds:
       - |
-        if [ "$#" -gt 0 ]; then
-          go run . "$@"
-        else
-          echo "Usage: task run -- [args]" && exit 1
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task collector:run -- [args]";
+          echo "Example: task collector:run -- --keyword KPMG";
+          exit 0;
         fi
+      - go run . {{.CLI_ARGS}}

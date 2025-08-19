@@ -35,4 +35,9 @@ tasks:
   test:
     desc: all go test
     cmds:
-      - go test . 
+      - go test ./... -v -cover
+
+  tidy:
+    desc: Go mod tidy
+    cmds:
+      - go mod tidy
