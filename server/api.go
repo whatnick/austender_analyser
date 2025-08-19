@@ -9,6 +9,9 @@ import (
 
 type ScrapeRequest struct {
 	Keyword string `json:"keyword"`
+	Company string `json:"company,omitempty"`
+	CompanyName string `json:"companyName,omitempty"`
+	Agency  string `json:"agency,omitempty"`
 }
 
 type ScrapeResponse struct {
@@ -26,8 +29,13 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	company := req.Company
+	if company == "" {
+		company = req.CompanyName
+	}
+
 	// Reuse collector logic directly (indirection for testability)
-	total, err := runScrape(req.Keyword, "", "")
+	total, err := runScrape(req.Keyword, company, req.Agency)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Error running collector"))
