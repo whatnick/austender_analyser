@@ -20,5 +20,10 @@ jobs:
           cache: true
           cache-dependency-path: '**/go.sum'
 
-      - name: Run all tests
-        run: bash ./hack/test-all.sh
+      - name: Install Task
+        uses: arduino/setup-task@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run all tests (task)
+        run: task test:all

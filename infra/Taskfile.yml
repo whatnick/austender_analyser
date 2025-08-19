@@ -1,0 +1,29 @@
+# https://taskfile.dev
+
+version: '3'
+
+tasks:
+  test:
+    desc: Run infra tests
+    cmds:
+      - go test ./... -v
+
+  tidy:
+    desc: Go mod tidy
+    cmds:
+      - go mod tidy
+
+  synth:
+    desc: Synthesize CDK app
+    cmds:
+      - cdk synth
+
+  deploy:
+    desc: Deploy the CDK stack (no approval prompts)
+    cmds:
+      - cdk deploy --require-approval never
+
+  destroy:
+    desc: Destroy the CDK stack (force without prompt)
+    cmds:
+      - cdk destroy -f

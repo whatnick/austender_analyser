@@ -1,0 +1,24 @@
+# https://taskfile.dev
+
+version: '3'
+
+tasks:
+  test:
+    desc: Run collector tests
+    cmds:
+      - go test ./... -v
+
+  tidy:
+    desc: Go mod tidy
+    cmds:
+      - go mod tidy
+
+  run:
+    desc: Run the collector CLI (pass flags after --)
+    cmds:
+      - |
+        if [ "$#" -gt 0 ]; then
+          go run . "$@"
+        else
+          echo "Usage: task run -- [args]" && exit 1
+        fi

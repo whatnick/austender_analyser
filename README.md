@@ -12,23 +12,29 @@ Set this up as a serverless go development project to answer spend questions by 
 - Cobra params parsing
 - Standard 3-tier design (BE,FE,DB)
 - Backend implementation in Golang
-- Frontend implementation in Angular/React/HTMX TBD
+- Minimal HTMX frontend included; richer UI (Angular/React) TBD
 - Fuzzy name matching in Google "did you mean" style
 - Temporal aggregate spend on raw AUD values, not inflation adjusted (I am not an economist)
-- Serverless hosting in AWS/Fly.io
+- Serverless-ready infra in AWS (CDK stack for Lambda + API Gateway + S3 + CloudFront)
 - DynamoDB cache of Austender data downloadable as CSV
 
 
-## Roadmap
-- Download one search result - KPMG
-- Identify fields to cache from Austender
-- Cron to download and populate dynamodb/clickhouse with Austender info
-- Webserver API to serve 1 set results
-    - total spend on org all time
-    - last 5 years
-    - last year
-- TDD
-- Go project layout as it matures : https://github.com/golang-standards/project-layout
+## Roadmap and Status
+
+- [x] Download one search result (e.g., KPMG) and verify totals (see docs image)
+- [x] Basic web server API to serve results for a keyword: POST `/api/scrape` -> `{ result: "$X.XX" }`
+- [x] Dual-mode server: local HTTP and AWS Lambda (API Gateway proxy) sharing the same scrape logic
+- [x] Initial tests: server unit tests and infra assertions; helper scripts in `hack/`
+- [x] Go multi-module layout (collector, server, infra) with direct reuse of collector in server
+- [x] CI workflow to run tests across all components via `hack/test-all.sh`
+- [ ] Identify fields to cache from Austender and design persistence schema
+- [ ] Scheduled ingestion (cron) to populate DynamoDB/ClickHouse with Austender data
+- [ ] API enhancements for time ranges (all-time, last 5 years, last year) and filters (agency/company)
+- [ ] Fuzzy name matching ("did you mean")
+- [ ] Frontend build/deploy pipeline (upload to S3, CloudFront invalidation) and richer UI
+- [ ] Performance, rate limiting, CORS, and basic auth hardening
+
+Reference: https://github.com/golang-standards/project-layout
 
 ## Folder Structure
 
@@ -39,6 +45,10 @@ The repository is organized as follows:
     - `main.go` - Entry point for the CLI tool.
     - `go.mod`, `go.sum` - Go module files.
     - `README.md` - Collector-specific documentation.
+- `server/` - Backend server implementation in Go (local HTTP + AWS Lambda handler) that reuses the collector logic directly.
+    - `api.go`, `main.go`, `*_test.go` - API, entry point, and tests.
+    - `go.mod`, `go.sum` - Go module files for server.
+- `frontend/` - Minimal HTMX page posting to `/api/scrape` to display totals.
 - `docs/` - Documentation and result images.
     - `KPMG_contracts_flood.png`, `KPMG_result_2023_01_22.png` - Example result images.
     - `README.md` - Documentation for the project.
@@ -49,11 +59,40 @@ The repository is organized as follows:
     - `README.md` - Infra-specific documentation.
 - `query/` - Reserved for query logic and documentation.
     - `README.md` - Query documentation.
-- `server/` - Backend server implementation in Go.
-    - `main.go`, `main_test.go` - Server entry point and tests.
-    - `Taskfile.yml` - Task automation for server.
-    - `go.mod`, `go.sum` - Go module files for server.
+- `hack/` - Helper scripts, including `test-all.sh` to run tests across all modules.
+- `.github/workflows/` - CI pipeline that runs `hack/test-all.sh` on pushes and PRs.
 
 Other files:
 - `LICENSE.md` - License information.
 - `Taskfile.yml` - Project-wide task automation.
+
+## How to run locally
+
+Prereqs: Go 1.23+, a browser. Optional: Task (https://taskfile.dev/#/installation).
+
+- With Task (recommended):
+    - Start API server: `task run:server`
+    - Open frontend: `task run:frontend`
+    - Start both: `task run:local`
+    - Run all tests: `task test:all`
+
+- With plain scripts:
+    - Start API server (localhost:8080): `bash hack/run-server.sh`
+    - Open the minimal frontend: `bash hack/run-frontend.sh`
+    - Start both: `bash hack/run-local.sh`
+
+API quick test (without frontend):
+- POST to `http://localhost:8080/api/scrape` with JSON body `{"keyword":"KPMG"}`; response is `{ "result": "$X.XX" }`.
+
+### Taskfile setup
+
+- Root `Taskfile.yml` aggregates per-component Taskfiles via `includes`.
+- Useful targets:
+    - `task test:all` – runs tests across collector, server, infra.
+    - `task run:server` – starts local API on :8080.
+    - `task run:frontend` – opens the HTMX page.
+    - `task run:local` – runs both.
+- Component Taskfiles:
+    - `collector/Taskfile.yml`: `task collector:test`, `task collector:tidy`.
+    - `server/Taskfile.yml`: `task server:test`, `task server:build`, `task server:fastdeploy`.
+    - `infra/Taskfile.yml`: `task infra:test`, `task infra:synth`, `task infra:deploy`, `task infra:destroy`.

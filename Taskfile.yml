@@ -38,7 +38,9 @@ tasks:
   test:all:
     desc: Run tests across collector, server, and infra
     cmds:
-      - bash ./hack/test-all.sh
+      - task: collector:test
+      - task: server:test
+      - task: infra:test
 
 
  
