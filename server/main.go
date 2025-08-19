@@ -23,22 +23,28 @@ func HandleLambdaRequest(ctx context.Context, req events.APIGatewayProxyRequest)
 	agency := req.QueryStringParameters["agency"]
 
 	if keyword == "" && req.Body != "" {
-		var body struct{
+		var body struct {
 			Keyword string `json:"keyword"`
 			Company string `json:"company"`
 			Agency  string `json:"agency"`
 		}
 		// Ignore JSON errors and keep defaults if body isn't valid JSON
 		_ = json.Unmarshal([]byte(req.Body), &body)
-		if keyword == "" { keyword = body.Keyword }
-		if company == "" { company = body.Company }
-		if agency == "" { agency = body.Agency }
+		if keyword == "" {
+			keyword = body.Keyword
+		}
+		if company == "" {
+			company = body.Company
+		}
+		if agency == "" {
+			agency = body.Agency
+		}
 	}
 
 	// Sensible defaults: allow empty company/agency to mean no filter
 	total, err := runScrape(keyword, company, agency)
 	if err != nil {
-		return events.APIGatewayProxyResponse{StatusCode: 500, Body: "{\"error\":\"collector failed\"}", Headers: map[string]string{"Content-Type":"application/json"}}, nil
+		return events.APIGatewayProxyResponse{StatusCode: 500, Body: "{\"error\":\"collector failed\"}", Headers: map[string]string{"Content-Type": "application/json"}}, nil
 	}
 	resp := ScrapeResponse{Result: total}
 	b, _ := json.Marshal(resp)
