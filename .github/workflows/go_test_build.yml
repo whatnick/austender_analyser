@@ -1,22 +1,24 @@
-name: Go package
+name: Go Tests
 
-on: 
+on:
   push:
-    paths:
-      - collector
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
 
 jobs:
-  build:
-
+  test-all:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.19
-      - name: Install dependencies
-        run: cd collector; go get .
-      - name: Test
-        run: cd collector; go test -cover
+          go-version: '1.23.x'
+          cache: true
+          cache-dependency-path: '**/go.sum'
+
+      - name: Run all tests
+        run: bash ./hack/test-all.sh
