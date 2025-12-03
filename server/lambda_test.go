@@ -6,12 +6,18 @@ import (
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
+	collector "github.com/whatnick/austender_analyser/collector/cmd"
 )
 
 func TestHandleLambdaRequest_Basic(t *testing.T) {
 	// stub runScrape for determinism
 	old := runScrape
-	runScrape = func(keyword, company, agency string) (string, error) { return "$42.00", nil }
+	runScrape = func(ctx context.Context, req collector.SearchRequest) (string, error) {
+		if req.Keyword != "EY" {
+			t.Fatalf("unexpected keyword: %s", req.Keyword)
+		}
+		return "$42.00", nil
+	}
 	defer func() { runScrape = old }()
 
 	req := events.APIGatewayProxyRequest{

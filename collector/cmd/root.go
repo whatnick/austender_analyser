@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -13,10 +14,28 @@ var rootCmd = &cobra.Command{
 	Long:  `Austender CLI tool to scrape and persist tender awards data for various companies`,
 	Run: func(cmd *cobra.Command, args []string) {
 		companyName, _ := cmd.Flags().GetString("c")
-		keywordVal, _ := cmd.Flags().GetString("d")
-		agencyVal, _ := cmd.Flags().GetString("k")
+		agencyVal, _ := cmd.Flags().GetString("d")
+		keywordVal, _ := cmd.Flags().GetString("k")
+		startRaw, _ := cmd.Flags().GetString("start-date")
+		endRaw, _ := cmd.Flags().GetString("end-date")
+		dateType, _ := cmd.Flags().GetString("date-type")
 
-		scrapeAncap(keywordVal, companyName, agencyVal)
+		start, err := parseDateFlag(startRaw)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		end, err := parseDateFlag(endRaw)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		if err := validateDateOrder(start, end); err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		scrapeAncap(keywordVal, companyName, agencyVal, start, end, dateType)
 	},
 }
 
@@ -29,6 +48,13 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().String("c", "", "Company to scan")
-	rootCmd.PersistentFlags().String("d", "", "Department to scan")
+	rootCmd.PersistentFlags().String("d", "", "Department/agency to scan")
 	rootCmd.PersistentFlags().String("k", "", "Keywords to scan")
+	rootCmd.PersistentFlags().String("start-date", "", "Optional start date (YYYY-MM-DD or RFC3339)")
+	rootCmd.PersistentFlags().String("end-date", "", "Optional end date (YYYY-MM-DD or RFC3339)")
+	rootCmd.PersistentFlags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")
+}
+
+func parseDateFlag(raw string) (time.Time, error) {
+	return parseDateInput(raw)
 }

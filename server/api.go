@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	collector "github.com/whatnick/austender_analyser/collector/cmd"
@@ -14,6 +16,9 @@ type ScrapeRequest struct {
 	Company     string `json:"company,omitempty"`
 	CompanyName string `json:"companyName,omitempty"`
 	Agency      string `json:"agency,omitempty"`
+	StartDate   string `json:"startDate,omitempty"`
+	EndDate     string `json:"endDate,omitempty"`
+	DateType    string `json:"dateType,omitempty"`
 }
 
 type ScrapeResponse struct {
@@ -21,7 +26,7 @@ type ScrapeResponse struct {
 }
 
 // function indirection for easier testing
-var runScrape = collector.RunScrape
+var runScrape = collector.RunSearch
 
 func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	// Basic CORS headers for browser requests (including file:// origins)
@@ -58,15 +63,43 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.StartDate == "" {
+		req.StartDate = r.Form.Get("startDate")
+	}
+	if req.EndDate == "" {
+		req.EndDate = r.Form.Get("endDate")
+	}
+	if req.DateType == "" {
+		req.DateType = r.Form.Get("dateType")
+	}
+
 	company := req.Company
 	if company == "" {
 		company = req.CompanyName
 	}
 
-	// Reuse collector logic directly (indirection for testability)
-	total, err := runScrape(req.Keyword, company, req.Agency)
+	start, err := parseRequestDate(req.StartDate)
 	if err != nil {
-		log.Printf("collector error: keyword=%q company=%q agency=%q err=%v", req.Keyword, company, req.Agency, err)
+		http.Error(w, fmt.Sprintf("invalid startDate: %v", err), http.StatusBadRequest)
+		return
+	}
+	end, err := parseRequestDate(req.EndDate)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid endDate: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Reuse collector logic directly (indirection for testability)
+	total, err := runScrape(r.Context(), collector.SearchRequest{
+		Keyword:   req.Keyword,
+		Company:   company,
+		Agency:    req.Agency,
+		StartDate: start,
+		EndDate:   end,
+		DateType:  req.DateType,
+	})
+	if err != nil {
+		log.Printf("collector error: keyword=%q company=%q agency=%q start=%q end=%q err=%v", req.Keyword, company, req.Agency, req.StartDate, req.EndDate, err)
 		http.Error(w, "Error running collector", http.StatusInternalServerError)
 		return
 	}
@@ -75,7 +108,20 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 
-	log.Printf("%s %s -> 200 in %s (keyword=%q company=%q agency=%q)", r.Method, r.URL.Path, time.Since(start), req.Keyword, company, req.Agency)
+	log.Printf("%s %s -> 200 in %s (keyword=%q company=%q agency=%q start=%q end=%q)", r.Method, r.URL.Path, time.Since(start), req.Keyword, company, req.Agency, req.StartDate, req.EndDate)
+}
+
+func parseRequestDate(raw string) (time.Time, error) {
+	if strings.TrimSpace(raw) == "" {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("expected RFC3339 or YYYY-MM-DD")
 }
 
 func RegisterHandlers() {
