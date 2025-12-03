@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,23 +21,27 @@ import (
 const (
 	defaultBaseURL        = "https://api.tenders.gov.au/ocds"
 	defaultDateType       = "contractPublished"
-	defaultLookbackDays   = 365
+	defaultLookbackYears  = 20
 	defaultRequestTimeout = 0
 	maxWindowDays         = 31
-	defaultMaxConcurrency = 4
+	requestMaxRetries     = 4
+	initialRetryDelay     = time.Second
 )
+
+var defaultMaxConcurrency = determineDefaultConcurrency()
 
 var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // SearchRequest defines all supported filters when querying the OCDS API.
 type SearchRequest struct {
-	Keyword   string
-	Company   string
-	Agency    string
-	StartDate time.Time
-	EndDate   time.Time
-	DateType  string
-	OnMatch   MatchHandler
+	Keyword       string
+	Company       string
+	Agency        string
+	StartDate     time.Time
+	EndDate       time.Time
+	DateType      string
+	LookbackYears int
+	OnMatch       MatchHandler
 }
 
 // MatchHandler streams each matching contract summary when verbose output is enabled.
@@ -180,7 +186,8 @@ func RunSearch(ctx context.Context, req SearchRequest) (string, error) {
 	}
 	defer cancel()
 
-	start, end := resolveDates(req.StartDate, req.EndDate)
+	lookbackYears := resolveLookbackYears(req.LookbackYears)
+	start, end := resolveDates(req.StartDate, req.EndDate, lookbackYears)
 	dateType := req.DateType
 	if dateType == "" {
 		dateType = defaultDateType
@@ -281,26 +288,49 @@ func (c *ocdsClient) fetchWindow(ctx context.Context, start, end time.Time) ([]o
 }
 
 func (c *ocdsClient) doRequest(ctx context.Context, target string) (*ocdsResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	backoff := initialRetryDelay
+	if backoff <= 0 {
+		backoff = time.Second
 	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt <= requestMaxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.httpClient.Do(req)
+		if err == nil {
+			if resp.StatusCode == http.StatusOK {
+				var decoded ocdsResponse
+				decodeErr := json.NewDecoder(resp.Body).Decode(&decoded)
+				resp.Body.Close()
+				if decodeErr != nil {
+					return nil, decodeErr
+				}
+				if decoded.ErrorCode != 0 {
+					return nil, fmt.Errorf("ocds api error %d: %s", decoded.ErrorCode, decoded.Message)
+				}
+				return &decoded, nil
+			}
+			err = fmt.Errorf("ocds api returned %s", resp.Status)
+			resp.Body.Close()
+			if !shouldRetryStatus(resp.StatusCode) {
+				return nil, err
+			}
+		}
+		lastErr = err
+		if attempt == requestMaxRetries {
+			break
+		}
+		if sleepErr := sleepWithContext(ctx, backoff); sleepErr != nil {
+			return nil, sleepErr
+		}
+		backoff *= 2
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ocds api returned %s", resp.Status)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("failed to contact ocds api after retries")
 	}
-	var decoded ocdsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return nil, err
-	}
-	if decoded.ErrorCode != 0 {
-		return nil, fmt.Errorf("ocds api error %d: %s", decoded.ErrorCode, decoded.Message)
-	}
-	return &decoded, nil
+	return nil, lastErr
 }
 
 func (c *ocdsClient) concurrencyLimit() int {
@@ -464,14 +494,17 @@ func parseReleaseTime(value string) time.Time {
 	return time.Time{}
 }
 
-func resolveDates(start, end time.Time) (time.Time, time.Time) {
+func resolveDates(start, end time.Time, lookbackYears int) (time.Time, time.Time) {
+	if lookbackYears <= 0 {
+		lookbackYears = defaultLookbackYears
+	}
 	endUTC := end
 	if endUTC.IsZero() {
 		endUTC = time.Now().UTC()
 	}
 	startUTC := start
 	if startUTC.IsZero() {
-		startUTC = endUTC.AddDate(0, 0, -defaultLookbackDays)
+		startUTC = endUTC.AddDate(-lookbackYears, 0, 0)
 	}
 	if startUTC.After(endUTC) {
 		startUTC, endUTC = endUTC, startUTC
@@ -499,11 +532,16 @@ func parseDateInput(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid date %q", raw)
 }
 
-func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time, dateType string, verbose bool) {
+func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time, dateType string, lookbackYears int, verbose bool) {
 	var onMatch MatchHandler
 	if verbose {
 		onMatch = func(summary MatchSummary) {
-			fmt.Printf("[match] %s | %s | %s | %s | %s\n",
+			dateText := ""
+			if !summary.ReleaseDate.IsZero() {
+				dateText = summary.ReleaseDate.Format("2006-01-02")
+			}
+			fmt.Printf("[match] %s | %s | %s | %s | %s | %s\n",
+				dateText,
 				summary.ContractID,
 				summary.Supplier,
 				summary.Agency,
@@ -513,13 +551,14 @@ func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time
 		}
 	}
 	result, err := RunSearch(context.Background(), SearchRequest{
-		Keyword:   keywordVal,
-		Company:   companyName,
-		Agency:    agencyVal,
-		StartDate: start,
-		EndDate:   end,
-		DateType:  dateType,
-		OnMatch:   onMatch,
+		Keyword:       keywordVal,
+		Company:       companyName,
+		Agency:        agencyVal,
+		StartDate:     start,
+		EndDate:       end,
+		DateType:      dateType,
+		LookbackYears: lookbackYears,
+		OnMatch:       onMatch,
 	})
 	if err != nil {
 		fmt.Println("Error:", err)
@@ -580,4 +619,46 @@ func resolveTimeout() time.Duration {
 		return defaultRequestTimeout
 	}
 	return dur
+}
+
+func determineDefaultConcurrency() int {
+	cores := runtime.NumCPU()
+	if cores <= 1 {
+		return 1
+	}
+	return cores - 1
+}
+
+func resolveLookbackYears(override int) int {
+	if override > 0 {
+		return override
+	}
+	raw := strings.TrimSpace(os.Getenv("AUSTENDER_LOOKBACK_YEARS"))
+	if raw != "" {
+		if yrs, err := strconv.Atoi(raw); err == nil && yrs > 0 {
+			return yrs
+		}
+	}
+	return defaultLookbackYears
+}
+
+func shouldRetryStatus(code int) bool {
+	if code == http.StatusTooManyRequests {
+		return true
+	}
+	return code >= 500 && code < 600
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

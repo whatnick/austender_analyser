@@ -19,9 +19,15 @@ func TestParseDateInput(t *testing.T) {
 
 func TestResolveDatesDefaultLookback(t *testing.T) {
 	end := time.Date(2024, 5, 1, 0, 0, 0, 0, time.UTC)
-	start, resolvedEnd := resolveDates(time.Time{}, end)
+	start, resolvedEnd := resolveDates(time.Time{}, end, defaultLookbackYears)
 	require.Equal(t, end, resolvedEnd)
-	require.Equal(t, end.AddDate(0, 0, -defaultLookbackDays), start)
+	require.Equal(t, end.AddDate(-defaultLookbackYears, 0, 0), start)
+}
+
+func TestResolveDatesCustomLookback(t *testing.T) {
+	end := time.Date(2024, 5, 1, 0, 0, 0, 0, time.UTC)
+	start, _ := resolveDates(time.Time{}, end, 3)
+	require.Equal(t, end.AddDate(-3, 0, 0), start)
 }
 
 func TestAggregateReleasesDedupesContracts(t *testing.T) {
@@ -111,5 +117,15 @@ func TestMatchHandlerReceivesStreamingUpdates(t *testing.T) {
 	require.False(t, summaries[0].IsUpdate)
 	require.True(t, summaries[1].IsUpdate)
 	require.Equal(t, "CN1", summaries[0].ContractID)
+	require.Equal(t, baseTime, summaries[0].ReleaseDate)
+	require.Equal(t, baseTime.Add(24*time.Hour), summaries[1].ReleaseDate)
 	require.Equal(t, decimal.NewFromInt(150), summaries[1].Amount)
+}
+
+func TestResolveLookbackYears(t *testing.T) {
+	require.Equal(t, 5, resolveLookbackYears(5))
+	t.Setenv("AUSTENDER_LOOKBACK_YEARS", "7")
+	require.Equal(t, 7, resolveLookbackYears(0))
+	t.Setenv("AUSTENDER_LOOKBACK_YEARS", "invalid")
+	require.Equal(t, defaultLookbackYears, resolveLookbackYears(0))
 }
