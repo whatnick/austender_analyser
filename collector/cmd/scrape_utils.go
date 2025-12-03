@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/leekchan/accounting"
 	"github.com/shopspring/decimal"
 )
@@ -591,7 +592,8 @@ func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time
 		fmt.Println("Error:", err)
 		return
 	}
-	fmt.Println("Total Contract:" + result)
+	totalStyle := color.New(color.FgRed, color.Bold)
+	fmt.Printf("Total Contract: %s\n", totalStyle.Sprint(result))
 }
 
 // validateDateOrder helps CLI inputs provide user-friendly errors.
