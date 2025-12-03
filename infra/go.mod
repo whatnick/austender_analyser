@@ -1,6 +1,8 @@
 module infra
 
-go 1.23
+go 1.25
+
+toolchain go1.25.5
 
 require (
 	github.com/aws/aws-cdk-go/awscdk/v2 v2.166.0

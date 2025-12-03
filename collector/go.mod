@@ -1,6 +1,8 @@
 module github.com/whatnick/austender_analyser/collector
 
-go 1.23
+go 1.25
+
+toolchain go1.25.5
 
 require (
 	github.com/gocolly/colly v1.2.0
