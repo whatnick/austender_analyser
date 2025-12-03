@@ -42,10 +42,14 @@ type SearchRequest struct {
 	DateType      string
 	LookbackYears int
 	OnMatch       MatchHandler
+	OnProgress    ProgressHandler
 }
 
 // MatchHandler streams each matching contract summary when verbose output is enabled.
 type MatchHandler func(MatchSummary)
+
+// ProgressHandler reports batch progress as windows finish processing.
+type ProgressHandler func(completed, total int)
 
 // MatchSummary captures the key fields printed for each matching contract.
 type MatchSummary struct {
@@ -202,7 +206,7 @@ func RunSearch(ctx context.Context, req SearchRequest) (string, error) {
 	}
 
 	agg := newContractAggregator(req)
-	if err := client.fetchAll(ctx, start, end, agg.process); err != nil {
+	if err := client.fetchAll(ctx, start, end, agg.process, req.OnProgress); err != nil {
 		return "", err
 	}
 
@@ -220,10 +224,16 @@ func RunScrape(keywordVal, companyName, agencyVal string) (string, error) {
 	})
 }
 
-func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time, consume func(ocdsRelease)) error {
+func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time, consume func(ocdsRelease), onProgress ProgressHandler) error {
 	windows := splitDateWindows(start, end, maxWindowDays)
 	if len(windows) == 0 {
 		return nil
+	}
+	totalWindows := len(windows)
+	notifyProgress := func(completed int) {
+		if onProgress != nil {
+			onProgress(completed, totalWindows)
+		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -262,12 +272,17 @@ func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time, consume
 		close(resCh)
 	}()
 
+	completed := 0
 	for res := range resCh {
 		if res.err != nil && !errors.Is(res.err, context.Canceled) {
 			return res.err
 		}
-		for _, rel := range res.rel {
-			consume(rel)
+		if res.err == nil {
+			for _, rel := range res.rel {
+				consume(rel)
+			}
+			completed++
+			notifyProgress(completed)
 		}
 	}
 	return nil
@@ -550,6 +565,17 @@ func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time
 			)
 		}
 	}
+	var onProgress ProgressHandler
+	var progressWriter *progressPrinter
+	if !verbose {
+		progressWriter = newProgressPrinter(28)
+		onProgress = func(done, total int) {
+			progressWriter.Update(done, total)
+		}
+	}
+	if progressWriter != nil {
+		defer progressWriter.Finish()
+	}
 	result, err := RunSearch(context.Background(), SearchRequest{
 		Keyword:       keywordVal,
 		Company:       companyName,
@@ -559,6 +585,7 @@ func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time
 		DateType:      dateType,
 		LookbackYears: lookbackYears,
 		OnMatch:       onMatch,
+		OnProgress:    onProgress,
 	})
 	if err != nil {
 		fmt.Println("Error:", err)
@@ -661,4 +688,54 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+type progressPrinter struct {
+	width    int
+	printed  bool
+	finished bool
+}
+
+func newProgressPrinter(width int) *progressPrinter {
+	if width <= 0 {
+		width = 20
+	}
+	return &progressPrinter{width: width}
+}
+
+func (p *progressPrinter) Update(done, total int) {
+	if total <= 0 {
+		return
+	}
+	if done < 0 {
+		done = 0
+	}
+	if done > total {
+		done = total
+	}
+	filled := done * p.width / total
+	if filled > p.width {
+		filled = p.width
+	}
+	bar := strings.Repeat("#", filled) + strings.Repeat("-", p.width-filled)
+	fmt.Printf("\rProgress [%s] %d/%d", bar, done, total)
+	p.printed = true
+	if done == total {
+		p.finishLine()
+	}
+}
+
+func (p *progressPrinter) Finish() {
+	if !p.printed || p.finished {
+		return
+	}
+	p.finishLine()
+}
+
+func (p *progressPrinter) finishLine() {
+	if p.finished {
+		return
+	}
+	fmt.Print("\n")
+	p.finished = true
 }
