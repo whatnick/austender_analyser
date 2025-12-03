@@ -19,6 +19,7 @@ var rootCmd = &cobra.Command{
 		startRaw, _ := cmd.Flags().GetString("start-date")
 		endRaw, _ := cmd.Flags().GetString("end-date")
 		dateType, _ := cmd.Flags().GetString("date-type")
+		verbose, _ := cmd.Flags().GetBool("verbose")
 
 		start, err := parseDateFlag(startRaw)
 		if err != nil {
@@ -35,7 +36,7 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
-		scrapeAncap(keywordVal, companyName, agencyVal, start, end, dateType)
+		scrapeAncap(keywordVal, companyName, agencyVal, start, end, dateType, verbose)
 	},
 }
 
@@ -53,6 +54,7 @@ func init() {
 	rootCmd.PersistentFlags().String("start-date", "", "Optional start date (YYYY-MM-DD or RFC3339)")
 	rootCmd.PersistentFlags().String("end-date", "", "Optional end date (YYYY-MM-DD or RFC3339)")
 	rootCmd.PersistentFlags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")
+	rootCmd.PersistentFlags().Bool("verbose", false, "Stream each matching contract as it is processed")
 }
 
 func parseDateFlag(raw string) (time.Time, error) {

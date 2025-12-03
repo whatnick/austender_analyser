@@ -57,7 +57,11 @@ func TestAggregateReleasesDedupesContracts(t *testing.T) {
 		},
 	}
 
-	total := aggregateReleases(releases, SearchRequest{})
+	agg := newContractAggregator(SearchRequest{})
+	for _, rel := range releases {
+		agg.process(rel)
+	}
+	total := agg.total()
 	require.Equal(t, decimal.NewFromInt(150), total)
 }
 
@@ -74,4 +78,38 @@ func TestMatchesFilters(t *testing.T) {
 	}
 	req := SearchRequest{Keyword: "CN123", Company: "acme", Agency: "ato"}
 	require.True(t, matchesFilters(rel, req))
+}
+
+func TestMatchHandlerReceivesStreamingUpdates(t *testing.T) {
+	baseTime := time.Date(2024, 7, 1, 0, 0, 0, 0, time.UTC)
+	var summaries []MatchSummary
+	req := SearchRequest{
+		OnMatch: func(summary MatchSummary) {
+			summaries = append(summaries, summary)
+		},
+	}
+	agg := newContractAggregator(req)
+	rel := ocdsRelease{
+		ID:   "rel-1",
+		Date: baseTime.Format(time.RFC3339),
+		Tag:  []string{"contract"},
+		Parties: []ocdsParty{
+			{Name: "Vendor", Roles: []string{"supplier"}},
+			{Name: "ATO", Roles: []string{"buyer"}},
+		},
+		Contracts: []ocdsContract{{ID: "CN1", Title: "Audit", Value: &ocdsValue{Amount: decimal.NewFromInt(100)}}},
+	}
+	update := rel
+	update.ID = "rel-2"
+	update.Date = baseTime.Add(24 * time.Hour).Format(time.RFC3339)
+	update.Contracts[0].Amendments = []ocdsAmendment{{ID: "CN1", AmendedValue: decimal.NewFromInt(150)}}
+	update.Tag = []string{"contractAmendment"}
+	for _, r := range []ocdsRelease{rel, update} {
+		agg.process(r)
+	}
+	require.Len(t, summaries, 2)
+	require.False(t, summaries[0].IsUpdate)
+	require.True(t, summaries[1].IsUpdate)
+	require.Equal(t, "CN1", summaries[0].ContractID)
+	require.Equal(t, decimal.NewFromInt(150), summaries[1].Amount)
 }

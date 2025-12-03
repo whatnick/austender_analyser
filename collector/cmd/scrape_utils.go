@@ -35,6 +35,23 @@ type SearchRequest struct {
 	StartDate time.Time
 	EndDate   time.Time
 	DateType  string
+	OnMatch   MatchHandler
+}
+
+// MatchHandler streams each matching contract summary when verbose output is enabled.
+type MatchHandler func(MatchSummary)
+
+// MatchSummary captures the key fields printed for each matching contract.
+type MatchSummary struct {
+	ContractID  string
+	ReleaseID   string
+	OCID        string
+	Supplier    string
+	Agency      string
+	Title       string
+	Amount      decimal.Decimal
+	ReleaseDate time.Time
+	IsUpdate    bool
 }
 
 type ocdsResponse struct {
@@ -91,6 +108,59 @@ type contractAggregate struct {
 	UpdatedAt time.Time
 }
 
+type contractAggregator struct {
+	filters    SearchRequest
+	aggregates map[string]contractAggregate
+}
+
+func newContractAggregator(req SearchRequest) *contractAggregator {
+	return &contractAggregator{
+		filters:    req,
+		aggregates: make(map[string]contractAggregate),
+	}
+}
+
+func (a *contractAggregator) process(rel ocdsRelease) {
+	if !isContractRelease(rel) || !matchesFilters(rel, a.filters) {
+		return
+	}
+	contractID, ok := canonicalContractID(rel)
+	if !ok {
+		return
+	}
+	amount, ok := releaseValue(rel)
+	if !ok || amount.LessThanOrEqual(decimal.Zero) {
+		return
+	}
+	releaseTime := parseReleaseTime(rel.Date)
+	entry, exists := a.aggregates[contractID]
+	if exists && !releaseTime.After(entry.UpdatedAt) {
+		return
+	}
+	a.aggregates[contractID] = contractAggregate{Value: amount, UpdatedAt: releaseTime}
+	if a.filters.OnMatch != nil {
+		a.filters.OnMatch(MatchSummary{
+			ContractID:  contractID,
+			ReleaseID:   rel.ID,
+			OCID:        rel.OCID,
+			Supplier:    primarySupplier(rel),
+			Agency:      primaryAgency(rel),
+			Title:       contractTitle(rel),
+			Amount:      amount,
+			ReleaseDate: releaseTime,
+			IsUpdate:    exists,
+		})
+	}
+}
+
+func (a *contractAggregator) total() decimal.Decimal {
+	total := decimal.Zero
+	for _, agg := range a.aggregates {
+		total = total.Add(agg.Value)
+	}
+	return total
+}
+
 type ocdsClient struct {
 	baseURL       string
 	dateType      string
@@ -124,12 +194,12 @@ func RunSearch(ctx context.Context, req SearchRequest) (string, error) {
 		maxConcurrent: defaultMaxConcurrency,
 	}
 
-	releases, err := client.fetchAll(ctx, start, end)
-	if err != nil {
+	agg := newContractAggregator(req)
+	if err := client.fetchAll(ctx, start, end, agg.process); err != nil {
 		return "", err
 	}
 
-	total := aggregateReleases(releases, req)
+	total := agg.total()
 	ac := accounting.Accounting{Symbol: "$", Precision: 2}
 	return ac.FormatMoney(total), nil
 }
@@ -143,10 +213,10 @@ func RunScrape(keywordVal, companyName, agencyVal string) (string, error) {
 	})
 }
 
-func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time) ([]ocdsRelease, error) {
+func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time, consume func(ocdsRelease)) error {
 	windows := splitDateWindows(start, end, maxWindowDays)
 	if len(windows) == 0 {
-		return nil, nil
+		return nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -185,19 +255,15 @@ func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time) ([]ocds
 		close(resCh)
 	}()
 
-	batches := make([][]ocdsRelease, len(windows))
 	for res := range resCh {
 		if res.err != nil && !errors.Is(res.err, context.Canceled) {
-			return nil, res.err
+			return res.err
 		}
-		batches[res.idx] = res.rel
+		for _, rel := range res.rel {
+			consume(rel)
+		}
 	}
-
-	var combined []ocdsRelease
-	for _, rels := range batches {
-		combined = append(combined, rels...)
-	}
-	return combined, nil
+	return nil
 }
 
 func (c *ocdsClient) fetchWindow(ctx context.Context, start, end time.Time) ([]ocdsRelease, error) {
@@ -250,41 +316,6 @@ func (c *ocdsClient) initialURLRange(start, end time.Time) string {
 		url.PathEscape(c.dateType),
 		start.Format(time.RFC3339),
 		end.Format(time.RFC3339))
-}
-
-func aggregateReleases(releases []ocdsRelease, req SearchRequest) decimal.Decimal {
-	if len(releases) == 0 {
-		return decimal.Zero
-	}
-	aggregates := make(map[string]contractAggregate)
-	for _, rel := range releases {
-		if !isContractRelease(rel) {
-			continue
-		}
-		if !matchesFilters(rel, req) {
-			continue
-		}
-		contractID, ok := canonicalContractID(rel)
-		if !ok {
-			continue
-		}
-		amount, ok := releaseValue(rel)
-		if !ok || amount.LessThanOrEqual(decimal.Zero) {
-			continue
-		}
-		updatedAt := parseReleaseTime(rel.Date)
-		agg, exists := aggregates[contractID]
-		if !exists || updatedAt.After(agg.UpdatedAt) {
-			agg.Value = amount
-			agg.UpdatedAt = updatedAt
-			aggregates[contractID] = agg
-		}
-	}
-	total := decimal.Zero
-	for _, agg := range aggregates {
-		total = total.Add(agg.Value)
-	}
-	return total
 }
 
 func isContractRelease(rel ocdsRelease) bool {
@@ -384,6 +415,13 @@ func (rel ocdsRelease) ContractsText() string {
 	return strings.Join([]string{contract.Title, contract.Description}, " ")
 }
 
+func contractTitle(rel ocdsRelease) string {
+	if len(rel.Contracts) == 0 {
+		return ""
+	}
+	return rel.Contracts[0].Title
+}
+
 func (rel ocdsRelease) TenderText() string {
 	if rel.Tender == nil {
 		return ""
@@ -461,7 +499,19 @@ func parseDateInput(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid date %q", raw)
 }
 
-func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time, dateType string) {
+func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time, dateType string, verbose bool) {
+	var onMatch MatchHandler
+	if verbose {
+		onMatch = func(summary MatchSummary) {
+			fmt.Printf("[match] %s | %s | %s | %s | %s\n",
+				summary.ContractID,
+				summary.Supplier,
+				summary.Agency,
+				summary.Amount.StringFixed(2),
+				summary.Title,
+			)
+		}
+	}
 	result, err := RunSearch(context.Background(), SearchRequest{
 		Keyword:   keywordVal,
 		Company:   companyName,
@@ -469,6 +519,7 @@ func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time
 		StartDate: start,
 		EndDate:   end,
 		DateType:  dateType,
+		OnMatch:   onMatch,
 	})
 	if err != nil {
 		fmt.Println("Error:", err)
