@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -12,27 +16,35 @@ import (
 )
 
 type ScrapeRequest struct {
-	Keyword     string `json:"keyword"`
-	Company     string `json:"company,omitempty"`
-	CompanyName string `json:"companyName,omitempty"`
-	Agency      string `json:"agency,omitempty"`
-	StartDate   string `json:"startDate,omitempty"`
-	EndDate     string `json:"endDate,omitempty"`
-	DateType    string `json:"dateType,omitempty"`
+	Keyword       string `json:"keyword"`
+	Company       string `json:"company,omitempty"`
+	CompanyName   string `json:"companyName,omitempty"`
+	Agency        string `json:"agency,omitempty"`
+	StartDate     string `json:"startDate,omitempty"`
+	EndDate       string `json:"endDate,omitempty"`
+	DateType      string `json:"dateType,omitempty"`
+	LookbackYears int    `json:"lookbackYears,omitempty"`
 }
 
 type ScrapeResponse struct {
 	Result string `json:"result"`
 }
 
+const defaultOCDSBaseURL = "https://api.tenders.gov.au/ocds"
+
+var mcpHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+type ocdsProxyParams struct {
+	DateType  string `json:"dateType,omitempty"`
+	StartDate string `json:"startDate"`
+	EndDate   string `json:"endDate"`
+}
+
 // function indirection for easier testing
 var runScrape = collector.RunSearch
 
 func scrapeHandler(w http.ResponseWriter, r *http.Request) {
-	// Basic CORS headers for browser requests (including file:// origins)
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -91,12 +103,13 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Reuse collector logic directly (indirection for testability)
 	total, err := runScrape(r.Context(), collector.SearchRequest{
-		Keyword:   req.Keyword,
-		Company:   company,
-		Agency:    req.Agency,
-		StartDate: start,
-		EndDate:   end,
-		DateType:  req.DateType,
+		Keyword:       req.Keyword,
+		Company:       company,
+		Agency:        req.Agency,
+		StartDate:     start,
+		EndDate:       end,
+		DateType:      req.DateType,
+		LookbackYears: req.LookbackYears,
 	})
 	if err != nil {
 		log.Printf("collector error: keyword=%q company=%q agency=%q start=%q end=%q err=%v", req.Keyword, company, req.Agency, req.StartDate, req.EndDate, err)
@@ -109,6 +122,52 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 
 	log.Printf("%s %s -> 200 in %s (keyword=%q company=%q agency=%q start=%q end=%q)", r.Method, r.URL.Path, time.Since(start), req.Keyword, company, req.Agency, req.StartDate, req.EndDate)
+}
+
+func setCORSHeaders(w http.ResponseWriter) {
+	// Basic CORS headers for browser requests (including file:// origins)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id, Mcp-Protocol-Version")
+}
+
+func proxyOCDSRequest(ctx context.Context, params ocdsProxyParams, start, end time.Time) (json.RawMessage, error) {
+	dateType := params.DateType
+	if dateType == "" {
+		dateType = "contractPublished"
+	}
+	base := resolveOCDSBaseURL()
+	endpoint := fmt.Sprintf("%s/findByDates/%s/%s/%s",
+		base,
+		url.PathEscape(dateType),
+		start.Format(time.RFC3339),
+		end.Format(time.RFC3339),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := mcpHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ocds proxy returned %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(body), nil
+}
+
+func resolveOCDSBaseURL() string {
+	base := strings.TrimSpace(os.Getenv("AUSTENDER_OCDS_BASE_URL"))
+	if base == "" {
+		return defaultOCDSBaseURL
+	}
+	return strings.TrimSuffix(base, "/")
 }
 
 func parseRequestDate(raw string) (time.Time, error) {
@@ -126,4 +185,7 @@ func parseRequestDate(raw string) (time.Time, error) {
 
 func RegisterHandlers() {
 	http.HandleFunc("/api/scrape", scrapeHandler)
+	mcpHandler := buildMCPHTTPHandler()
+	http.Handle("/api/mcp", mcpHandler)
+	http.Handle("/api/mcp/", mcpHandler)
 }
