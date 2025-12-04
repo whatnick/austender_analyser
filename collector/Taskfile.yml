@@ -17,9 +17,9 @@ tasks:
     desc: Run the collector CLI (pass flags after --)
     cmds:
       - |
-        if [ -z "{{.CLI_ARGS}}" ]; then
-          echo "Usage: task collector:run -- [args]";
-          echo "Example: task collector:run -- --keyword KPMG";
-          exit 0;
+        ARGS="{{.CLI_ARGS}}"
+        if [ -z "$ARGS" ]; then
+          echo "No CLI args supplied; running demo scrape for Accenture (override via task collector:run -- --keyword <TERM>)."
+          ARGS="--c Accenture"
         fi
-      - go run . {{.CLI_ARGS}}
+        go run . $ARGS

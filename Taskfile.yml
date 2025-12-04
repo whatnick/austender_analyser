@@ -6,7 +6,12 @@ env:
   AWS_DEFAULT_REGION: ap-southeast-1
   CDK_DEFAULT_REGION: ap-southeast-1
   CDK_DEFAULT_ACCOUNT: 
-    sh: aws sts get-caller-identity --query Account --output text
+    sh: |
+      if command -v aws >/dev/null 2>&1; then
+        aws sts get-caller-identity --query Account --output text 2>/dev/null || true
+      else
+        echo ""
+      fi
 
 
 includes:
