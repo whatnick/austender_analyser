@@ -1,0 +1,94 @@
+name: Collector Release
+
+on:
+  push:
+    tags:
+      - 'collector-v*'
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+            extension: ''
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+            extension: ''
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+            extension: ''
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+            extension: ''
+          - goos: windows
+            goarch: amd64
+            archive: zip
+            extension: '.exe'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+          cache-dependency-path: '**/go.sum'
+
+      - name: Build collector binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          OUTPUT_PREFIX="collector-${{ matrix.goos }}-${{ matrix.goarch }}"
+          BIN_NAME="collector${{ matrix.extension }}"
+          BUILD_DIR="$PWD/build/${OUTPUT_PREFIX}"
+          DIST_DIR="$PWD/dist"
+          mkdir -p "$BUILD_DIR" "$DIST_DIR"
+          pushd collector >/dev/null
+          go build -trimpath -ldflags "-s -w" -o "$BUILD_DIR/$BIN_NAME" .
+          popd >/dev/null
+          if [ '${{ matrix.archive }}' = 'zip' ]; then
+            zip -j "$DIST_DIR/${OUTPUT_PREFIX}.zip" "$BUILD_DIR/$BIN_NAME"
+          else
+            tar -czf "$DIST_DIR/${OUTPUT_PREFIX}.tar.gz" -C "$(dirname "$BUILD_DIR")" "${OUTPUT_PREFIX}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: collector-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/collector-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
