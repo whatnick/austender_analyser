@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ type ScrapeRequest struct {
 	EndDate       string `json:"endDate,omitempty"`
 	DateType      string `json:"dateType,omitempty"`
 	LookbackYears int    `json:"lookbackYears,omitempty"`
+	UseCache      *bool  `json:"useCache,omitempty"`
 }
 
 type ScrapeResponse struct {
@@ -41,7 +43,7 @@ type ocdsProxyParams struct {
 }
 
 // function indirection for easier testing
-var runScrape = collector.RunSearch
+var runScrape = collector.RunSearchPreferCache
 
 func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
@@ -84,6 +86,13 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	if req.DateType == "" {
 		req.DateType = r.Form.Get("dateType")
 	}
+	if req.UseCache == nil {
+		if raw := r.Form.Get("useCache"); raw != "" {
+			if v, err := strconv.ParseBool(raw); err == nil {
+				req.UseCache = &v
+			}
+		}
+	}
 
 	company := req.Company
 	if company == "" {
@@ -101,8 +110,12 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reuse collector logic directly (indirection for testability)
-	total, err := runScrape(r.Context(), collector.SearchRequest{
+	useCache := true
+	if req.UseCache != nil {
+		useCache = *req.UseCache
+	}
+
+	searchReq := collector.SearchRequest{
 		Keyword:       req.Keyword,
 		Company:       company,
 		Agency:        req.Agency,
@@ -110,7 +123,14 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		EndDate:       end,
 		DateType:      req.DateType,
 		LookbackYears: req.LookbackYears,
-	})
+	}
+
+	var total string
+	if useCache {
+		total, err = runScrape(r.Context(), searchReq)
+	} else {
+		total, err = collector.RunSearch(r.Context(), searchReq)
+	}
 	if err != nil {
 		log.Printf("collector error: keyword=%q company=%q agency=%q start=%q end=%q err=%v", req.Keyword, company, req.Agency, req.StartDate, req.EndDate, err)
 		http.Error(w, "Error running collector", http.StatusInternalServerError)
