@@ -43,8 +43,9 @@ func runDuckDBQuery(ctx context.Context, cacheDir, sql string) error {
 	if cacheDir == "" {
 		cacheDir = defaultCacheDir()
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, "parquet")); err != nil {
-		return fmt.Errorf("parquet cache not found; run `austender cache --keyword <term>` first: %w", err)
+	lakeDir := filepath.Join(cacheDir, "lake")
+	if _, err := os.Stat(lakeDir); err != nil {
+		return fmt.Errorf("lake not found; run `austender cache` or `task collector:prime-lake` first: %w", err)
 	}
 	duckPath, err := exec.LookPath("duckdb")
 	if err != nil {
@@ -52,7 +53,7 @@ func runDuckDBQuery(ctx context.Context, cacheDir, sql string) error {
 	}
 
 	// DuckDB supports globbing; we scan all parquet parts under the cache.
-	parquetGlob := filepath.Join(cacheDir, "parquet", "**", "*.parquet")
+	parquetGlob := filepath.Join(cacheDir, "lake", "**", "*.parquet")
 	sql = strings.ReplaceAll(sql, "{{PARQUET_GLOB}}", parquetGlob)
 
 	cmd := exec.CommandContext(ctx, duckPath, "-json", "-c", sql)
@@ -65,8 +66,8 @@ func defaultAnalyticsSQL(cacheDir string, limit int) string {
 	return fmt.Sprintf(`
 with data as (
   select
-    financial_year,
-    agency,
+		financial_year,
+		agency,
     sum(amount) as total_amount,
     count(*) as records
   from parquet_scan('{{PARQUET_GLOB}}')

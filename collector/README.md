@@ -15,7 +15,7 @@
 - If the catalog drifts from on-disk files, run `collector reindex-lake --cache-dir <dir>` to rescan the lake and rebuild `parquet_files`.
 
 ## Useful commands
-- Prime lake and reindex (Task): `task collector:prime-lake -- --lookback-years 5`
+- Prime lake and reindex (Task): `task collector:prime-lake -- --lookback-years 5` (filters optional; keyword/company/agency empty hydrates everything in window)
 - Prime lake and reindex (shell): `bash ../hack/prime-datalake.sh --lookback-years 5`
 - Build binary: `task collector:build` or `bash ../hack/build-collector.sh`
-- Query with cache: `go run . cache --keyword KPMG` (filters optional)
+- Query with cache: `go run . cache --keyword KPMG` (all filters optional)

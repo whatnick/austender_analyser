@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,18 +169,17 @@ func (l *dataLake) rebuildIndex(ctx context.Context) error {
 // queryTotals returns sum of matching rows using the lake index to pick files.
 func (l *dataLake) queryTotals(ctx context.Context, filters SearchRequest) (decimalSum decimalSumResult, matched bool, err error) {
 	// Collect candidate files via index filtering.
-	agencyKey := sanitizePartitionComponent(filters.Agency)
-	companyKey := sanitizePartitionComponent(filters.Company)
-
 	var args []any
 	var clauses []string
-	if agencyKey != "" {
-		clauses = append(clauses, "agency_key = ?")
-		args = append(args, agencyKey)
+	if strings.TrimSpace(filters.Agency) != "" {
+		agencyKey := sanitizePartitionComponent(filters.Agency)
+		clauses = append(clauses, "agency_key LIKE ?")
+		args = append(args, "%"+agencyKey+"%")
 	}
-	if companyKey != "" {
-		clauses = append(clauses, "company_key = ?")
-		args = append(args, companyKey)
+	if strings.TrimSpace(filters.Company) != "" {
+		companyKey := sanitizePartitionComponent(filters.Company)
+		clauses = append(clauses, "company_key LIKE ?")
+		args = append(args, "%"+companyKey+"%")
 	}
 
 	// Lookback by FY if specified
@@ -271,24 +271,21 @@ func sumParquetFile(path string, filters SearchRequest) (decimal.Decimal, bool, 
 // hasMonthPartition returns true if a month partition already contains parquet files.
 func (l *dataLake) hasMonthPartition(ts time.Time) bool {
 	root := filepath.Join(l.baseDir, "lake", financialYearLabel(ts), monthLabel(ts))
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			sub, err := os.ReadDir(filepath.Join(root, e.Name()))
-			if err != nil {
-				continue
-			}
-			for _, f := range sub {
-				if !f.IsDir() && strings.HasSuffix(strings.ToLower(f.Name()), ".parquet") {
-					return true
-				}
-			}
+	found := false
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-	}
-	return false
+		if found {
+			return fs.SkipAll
+		}
+		if !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".parquet") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // shouldFetchWindow reports whether a date window should be fetched based on existing partitions.

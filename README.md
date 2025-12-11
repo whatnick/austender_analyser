@@ -58,14 +58,14 @@ Prereqs: Go 1.25+, a browser. Optional: Task (https://taskfile.dev/#/installatio
     - Start both: `task run:local`
     - Run all tests: `task test:all`
     - Build collector: `task collector:build`
-    - Prime lake + reindex: `task collector:prime-lake -- --lookback-years 5` (filters optional)
+    - Prime lake + reindex: `task collector:prime-lake -- --lookback-years 5` (filters optional; keyword/company/agency all optional)
 
 - With plain scripts:
     - Start API server (localhost:8080): `bash hack/run-server.sh`
     - Open the minimal frontend: `bash hack/run-frontend.sh`
     - Start both: `bash hack/run-local.sh`
     - Build collector: `bash hack/build-collector.sh`
-    - Prime lake + reindex: `bash hack/prime-datalake.sh --lookback-years 5`
+    - Prime lake + reindex: `bash hack/prime-datalake.sh --lookback-years 5` (filters optional)
 
 API quick test (without frontend):
 - POST to `http://localhost:8080/api/scrape` with JSON body `{"keyword":"KPMG"}`; response is `{ "result": "$X.XX" }`. Leave `keyword` empty to prime cache ranges.

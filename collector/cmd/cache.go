@@ -18,6 +18,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const indexRebuildInterval = 24 * time.Hour
+
+// runSearchFunc is overridable for tests to assert cache short-circuits.
+var runSearchFunc = RunSearch
+
 // cacheCmd wires an incremental ETL that writes OCDS matches into parquet files
 // and tracks checkpoints in a lightweight SQLite catalog. Subsequent runs resume
 // from the last completed window while full scrapes remain available via the
@@ -98,6 +103,12 @@ var cacheCmd = &cobra.Command{
 			},
 		})
 		pool.closeAll()
+		if cache.shouldReindex() {
+			if err := cache.lake.rebuildIndex(context.Background()); err != nil {
+				return err
+			}
+			cache.markReindexed()
+		}
 		if err != nil {
 			return err
 		}
@@ -117,7 +128,7 @@ var cacheCmd = &cobra.Command{
 func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, error) {
 	useCache := strings.ToLower(strings.TrimSpace(os.Getenv("AUSTENDER_USE_CACHE")))
 	if useCache == "false" || useCache == "0" {
-		res, err := RunSearch(ctx, req)
+		res, err := runSearchFunc(ctx, req)
 		return res, false, err
 	}
 
@@ -128,20 +139,22 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 	defer cache.close()
 
 	checkpointKey := cacheKey(req.Keyword, req.Company, req.Agency, req.DateType)
-	resumeFrom, _ := cache.loadCheckpoint(checkpointKey)
-	start := req.StartDate
-	end := req.EndDate
-	if !resumeFrom.IsZero() && (start.IsZero() || resumeFrom.After(start)) {
-		start = resumeFrom
-	}
+	_, _ = cache.loadCheckpoint(checkpointKey)
+	resolvedLookback := resolveLookbackYears(req.LookbackYears)
+	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, resolvedLookback)
 
-	cachedTotal, cacheHit, err := cache.queryCache(req)
+	workingReq := req
+	workingReq.StartDate = startResolved
+	workingReq.EndDate = endResolved
+	workingReq.LookbackYears = resolvedLookback
+
+	cachedTotal, cacheHit, err := cache.queryCache(workingReq)
 	if err != nil {
 		return "", false, err
 	}
 
-	// If we have a cache hit and a recent checkpoint, short-circuit to avoid unnecessary fetches.
-	if cacheHit && !resumeFrom.IsZero() && time.Since(resumeFrom) < 24*time.Hour && start.Equal(resumeFrom) && end.IsZero() {
+	// If every window in range already exists in the lake, rely on the cached total.
+	if cacheHit && cache.lake != nil && windowsCached(cache.lake, startResolved, endResolved) {
 		return formatMoneyDecimal(cachedTotal), true, nil
 	}
 
@@ -154,14 +167,14 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 		_ = pool.write(summary)
 	}
 
-	incStr, err := RunSearch(ctx, SearchRequest{
+	incStr, err := runSearchFunc(ctx, SearchRequest{
 		Keyword:       req.Keyword,
 		Company:       req.Company,
 		Agency:        req.Agency,
-		StartDate:     start,
-		EndDate:       end,
+		StartDate:     startResolved,
+		EndDate:       endResolved,
 		DateType:      req.DateType,
-		LookbackYears: req.LookbackYears,
+		LookbackYears: resolvedLookback,
 		OnMatch:       mergedOnMatch,
 		OnAnyMatch: func(ms MatchSummary) {
 			_ = pool.write(ms)
@@ -176,6 +189,12 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 	}
 
 	pool.closeAll()
+	if cache.shouldReindex() {
+		if err := cache.lake.rebuildIndex(ctx); err != nil {
+			return "", cacheHit, err
+		}
+		cache.markReindexed()
+	}
 
 	incDec, err := parseMoneyToDecimal(incStr)
 	if err != nil {
@@ -183,7 +202,7 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 	}
 	combined := cachedTotal.Add(incDec)
 
-	finalCheckpoint := end
+	finalCheckpoint := endResolved
 	if finalCheckpoint.IsZero() {
 		finalCheckpoint = time.Now().UTC()
 	}
@@ -198,11 +217,24 @@ func RunSearchPreferCache(ctx context.Context, req SearchRequest) (string, error
 	return res, err
 }
 
+// windowsCached returns true when every date window between start and end already has a lake partition.
+func windowsCached(l *dataLake, start, end time.Time) bool {
+	if l == nil {
+		return false
+	}
+	for _, win := range splitDateWindows(start, end, maxWindowDays) {
+		if l.shouldFetchWindow(win) {
+			return false
+		}
+	}
+	return true
+}
+
 func init() {
 	rootCmd.AddCommand(cacheCmd)
-	cacheCmd.Flags().String("keyword", "", "Keyword to scan (required)")
-	cacheCmd.Flags().String("company", "", "Company to scan")
-	cacheCmd.Flags().String("agency", "", "Agency to scan")
+	cacheCmd.Flags().String("keyword", "", "Keyword to scan (optional; empty primes cache/lake)")
+	cacheCmd.Flags().String("company", "", "Company filter (optional)")
+	cacheCmd.Flags().String("agency", "", "Agency filter (optional)")
 	cacheCmd.Flags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")
 	cacheCmd.Flags().Int("lookback-years", defaultLookbackYears, "Default window when start not specified")
 	cacheCmd.Flags().String("cache-dir", defaultCacheDir(), "Directory for parquet files and sqlite catalog")
@@ -215,6 +247,22 @@ type cacheManager struct {
 	baseDir string
 	db      *sql.DB
 	lake    *dataLake
+}
+
+func (m *cacheManager) indexMarkerPath() string {
+	return filepath.Join(m.baseDir, "index.last")
+}
+
+func (m *cacheManager) shouldReindex() bool {
+	info, err := os.Stat(m.indexMarkerPath())
+	if err != nil {
+		return true
+	}
+	return time.Since(info.ModTime()) >= indexRebuildInterval
+}
+
+func (m *cacheManager) markReindexed() {
+	_ = os.WriteFile(m.indexMarkerPath(), []byte(time.Now().UTC().Format(time.RFC3339)), 0o644)
 }
 
 func formatMoneyDecimal(v decimal.Decimal) string {
