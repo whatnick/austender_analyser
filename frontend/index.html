@@ -3,50 +3,127 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Austender Analyser Frontend</title>
+    <title>Austender Analyser Chat</title>
     <!-- Environment config -->
     <script src="./config.local.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/json-enc.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-        <style>
-            .htmx-indicator { display: none; }
-            .htmx-request .htmx-indicator { display: inline-block; }
-        </style>
+    <style>
+        body { background: linear-gradient(135deg, #f7f9fc 0%, #eef2f7 100%); }
+        .chat-card { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08); border: none; }
+        .chat-log { height: 400px; overflow-y: auto; padding: 1rem; background: #fff; border-radius: 0.5rem; border: 1px solid #e5e7eb; }
+        .msg { margin-bottom: 1rem; }
+        .msg .role { font-weight: 600; color: #0d6efd; }
+        .msg.assistant .role { color: #20c997; }
+        .context { font-size: 0.85rem; color: #6c757d; margin-top: 0.25rem; }
+        .pill { display: inline-block; padding: 0.35rem 0.6rem; border-radius: 999px; background: #0d6efd; color: #fff; font-size: 0.8rem; }
+    </style>
 </head>
 <body class="container py-5">
-        <h1 class="mb-4">Austender Analyser</h1>
-        <form id="scrape-form" hx-post="#" hx-ext="json-enc" hx-encoding="json" hx-swap="none" class="mb-4"
-              hx-on::before-request="document.getElementById('analyseBtn').disabled=true"
-              hx-on::after-request="document.getElementById('analyseBtn').disabled=false; try{const d=JSON.parse(event.detail.xhr.responseText);document.querySelector('#results').textContent=d.result||event.detail.xhr.responseText;}catch(e){document.querySelector('#results').textContent=event.detail.xhr.responseText}">
-        <div class="mb-3">
-            <label for="keyword" class="form-label">Search Keyword</label>
-            <input type="text" class="form-control" id="keyword" name="keyword" required>
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <div class="d-flex align-items-center mb-3">
+                <div class="pill me-2">Chat</div>
+                <h1 class="m-0">Austender Analyser</h1>
+            </div>
+            <p class="text-muted">Ask spend questions in plain text. Toggle MCP to let the model call local MCP tools.</p>
+
+            <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="toggle-mcp" checked>
+                <label class="form-check-label" for="toggle-mcp">Enable MCP backend (includes config in the request)</label>
+            </div>
+
+            <div class="card chat-card mb-3">
+                <div class="card-body">
+                    <div id="chat-log" class="chat-log" aria-live="polite"></div>
+                    <form id="chat-form" class="mt-3" hx-ext="json-enc" hx-encoding="json" hx-swap="none">
+                        <label for="prompt" class="form-label">Your question</label>
+                        <textarea id="prompt" name="prompt" class="form-control" rows="3" placeholder="e.g., How much was spent by Department of Defence?" required></textarea>
+                        <div class="d-flex align-items-center mt-3">
+                            <button type="submit" class="btn btn-primary" id="sendBtn">
+                                <span class="spinner-border spinner-border-sm htmx-indicator me-2" role="status" aria-hidden="true"></span>
+                                Send
+                            </button>
+                            <div class="ms-3 text-muted" id="status-msg"></div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div class="small text-muted">Requests POST to `/api/llm`. MCP config is attached only when the toggle is on.</div>
         </div>
-        <div class="mb-3">
-            <label for="company" class="form-label">Company (optional)</label>
-            <input type="text" class="form-control" id="company" name="company">
-        </div>
-        <div class="mb-3">
-            <label for="agency" class="form-label">Agency (optional)</label>
-            <input type="text" class="form-control" id="agency" name="agency">
-        </div>
-        <button type="submit" class="btn btn-primary" id="analyseBtn">
-            <span class="spinner-border spinner-border-sm htmx-indicator me-2" role="status" aria-hidden="true"></span>
-            Analyse
-        </button>
-    </form>
-    <div id="results" class="mt-4">
-        <!-- Results will appear here -->
     </div>
-        <script>
-            (function() {
-                var apiBase = (window.APP_CONFIG && window.APP_CONFIG.apiBase) || 'http://localhost:8080';
-                var form = document.getElementById('scrape-form');
-                if (form) {
-                    form.setAttribute('hx-post', apiBase.replace(/\/$/, '') + '/api/scrape');
+
+    <script>
+        (function() {
+            var apiBase = (window.APP_CONFIG && window.APP_CONFIG.apiBase) || 'http://localhost:8080';
+            var mcpConfig = (window.APP_CONFIG && window.APP_CONFIG.mcpConfig) || null;
+            var form = document.getElementById('chat-form');
+            var promptEl = document.getElementById('prompt');
+            var logEl = document.getElementById('chat-log');
+            var sendBtn = document.getElementById('sendBtn');
+            var statusEl = document.getElementById('status-msg');
+            var toggleMcp = document.getElementById('toggle-mcp');
+
+            function appendMessage(role, text, context) {
+                var wrapper = document.createElement('div');
+                wrapper.className = 'msg ' + role.toLowerCase();
+
+                var roleEl = document.createElement('div');
+                roleEl.className = 'role';
+                roleEl.textContent = role;
+
+                var textEl = document.createElement('div');
+                textEl.textContent = text;
+
+                wrapper.appendChild(roleEl);
+                wrapper.appendChild(textEl);
+
+                if (context) {
+                    var ctxEl = document.createElement('div');
+                    ctxEl.className = 'context';
+                    ctxEl.textContent = 'Context: ' + context;
+                    wrapper.appendChild(ctxEl);
                 }
-            })();
-        </script>
+
+                logEl.appendChild(wrapper);
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            async function sendPrompt(prompt) {
+                var payload = { prompt: prompt, prefetch: !!toggleMcp.checked };
+                if (toggleMcp.checked && mcpConfig) {
+                    payload.mcpConfig = mcpConfig;
+                }
+
+                statusEl.textContent = 'Sending...';
+                sendBtn.disabled = true;
+                try {
+                    var res = await fetch(apiBase.replace(/\/$/, '') + '/api/llm', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    var data = await res.json();
+                    appendMessage('Assistant', data.result || '[no result]', data.context);
+                } catch (err) {
+                    appendMessage('Assistant', 'Error: ' + err.message);
+                } finally {
+                    sendBtn.disabled = false;
+                    statusEl.textContent = '';
+                }
+            }
+
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                var prompt = (promptEl.value || '').trim();
+                if (!prompt) return;
+                appendMessage('You', prompt);
+                promptEl.value = '';
+                sendPrompt(prompt);
+            });
+        })();
+    </script>
 </body>
 </html>

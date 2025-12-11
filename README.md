@@ -12,7 +12,7 @@ Set this up as a serverless go development project to answer spend questions by 
 - Cobra params parsing
 - Standard 3-tier design (BE,FE,DB)
 - Backend implementation in Golang
-- Minimal HTMX frontend included; richer UI (Angular/React) TBD
+- Chat-style HTMX frontend hitting `/api/llm` with an optional MCP toggle for tool-aware responses; toggle also controls cache prefetch
 - Fuzzy name matching in Google "did you mean" style
 - Temporal aggregate spend on raw AUD values, not inflation adjusted (I am not an economist)
 - Serverless-ready infra in AWS (CDK stack for Lambda + API Gateway + S3 + CloudFront)
@@ -45,10 +45,11 @@ The repository is organized as follows:
     - `main.go` - Entry point for the CLI tool.
     - `go.mod`, `go.sum` - Go module files.
     - `README.md` - Collector-specific documentation.
-- `server/` - Backend server implementation in Go (local HTTP + AWS Lambda handler) that reuses the collector logic directly.
+- `server/` - Backend server implementation in Go (local HTTP + AWS Lambda handler) that reuses the collector logic directly. Hosts `/api/scrape` and `/api/llm` plus MCP tools.
     - `api.go`, `main.go`, `*_test.go` - API, entry point, and tests.
+    - `llm_handler.go` - LLM+MCP entry with optional cache prefetch via `prefetch` flag.
     - `go.mod`, `go.sum` - Go module files for server.
-- `frontend/` - Minimal HTMX page posting to `/api/scrape` to display totals.
+- `frontend/` - Static HTMX chat page posting to `/api/llm` with MCP toggle and cache prefetch control.
 - `docs/` - Documentation and result images.
     - `KPMG_contracts_flood.png`, `KPMG_result_2023_01_22.png` - Example result images.
     - `README.md` - Documentation for the project.
@@ -84,6 +85,21 @@ Prereqs: Go 1.23+, a browser. Optional: Task (https://taskfile.dev/#/installatio
 API quick test (without frontend):
 - POST to `http://localhost:8080/api/scrape` with JSON body `{"keyword":"KPMG"}`; response is `{ "result": "$X.XX" }`.
 
+LLM/MCP quick test:
+- POST to `http://localhost:8080/api/llm` with `{ "prompt": "How much was spent by Department of Defence?", "prefetch": true }` to include cache context, or set `prefetch` false to skip collector queries. Attach `mcpConfig` JSON to allow the model to call tools.
+
+### MCP-friendly chat frontend
+
+- Open `frontend/index.html` (or run `task run:frontend`) and use the chat box to ask spend questions.
+- Toggle “Enable MCP backend” to attach the MCP config from `frontend/config.local.js` to `/api/llm` calls. When off, the server also skips cache prefetch to isolate pure LLM responses.
+- Responses include any prefetched cache context when the server can answer locally.
+
+### Architecture (high level)
+- The frontend is a static HTMX chat page. Each send posts JSON to `/api/llm` and optionally includes an MCP config and `prefetch` flag.
+- The server `llmHandler` parses prompts, optionally prefetches spend totals from the collector cache when `prefetch` is true, injects that context, and passes prompts to the selected LLM (OpenAI-compatible via langchaingo). MCP requests are forwarded as config so downstream agents can call tools.
+- The collector provides scraping/search helpers and cached parquet-backed spend lookups consumed by the server.
+- Infra packages the server for Lambda/API Gateway and serves the static frontend via S3/CloudFront.
+
 ### Taskfile setup
 
 - Root `Taskfile.yml` aggregates per-component Taskfiles via `includes`.
@@ -96,3 +112,13 @@ API quick test (without frontend):
     - `collector/Taskfile.yml`: `task collector:test`, `task collector:tidy`.
     - `server/Taskfile.yml`: `task server:test`, `task server:build`, `task server:fastdeploy`.
     - `infra/Taskfile.yml`: `task infra:test`, `task infra:synth`, `task infra:deploy`, `task infra:destroy`.
+
+## Allied MCP ideas for spend analysis
+
+These MCPs pair well with the Austender tools to broaden government spend context:
+
+- OpenSpending / Government Expenditure MCP: query consolidated budget or COFOG-classified spend datasets (e.g., GIFT/OKFN catalogs).
+- USAspending MCP: pull US federal contract and assistance obligations for cross-jurisdiction comparisons.
+- EU TED/Open Procurement MCP: fetch EU tender awards to benchmark vendor exposure across regions.
+- Open Contracting Data Standard (OCDS) Registry MCP: discover and pull published OCDS releases from other jurisdictions for side-by-side analysis.
+- Data.gov.au Budget/PAES MCP: surface Australian budget paper line items to compare appropriations vs. awarded contract spend.

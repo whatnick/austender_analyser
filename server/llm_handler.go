@@ -32,6 +32,10 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prompt is required", http.StatusBadRequest)
 		return
 	}
+	prefetchAllowed := true
+	if req.Prefetch != nil {
+		prefetchAllowed = *req.Prefetch
+	}
 	if len(req.MCPConfig) == 0 {
 		req.MCPConfig = defaultMCPConfig()
 	}
@@ -50,10 +54,15 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	basePrompt := req.Prompt
 
 	var prefetchedContext string
-	// If the prompt looks like a spend query, prefetch using the collector cache and inject context.
-	if pre, err := maybePrefetchSpend(r.Context(), req.Prompt); err == nil && pre != "" {
-		prefetchedContext = pre
-		basePrompt = pre + "\n\n" + basePrompt
+	// If allowed and the prompt looks like a spend query, prefetch using the collector cache and inject context.
+	if prefetchAllowed {
+		if pre, err := maybePrefetchComparison(r.Context(), req.Prompt); err == nil && pre != "" {
+			prefetchedContext = pre
+			basePrompt = pre + "\n\n" + basePrompt
+		} else if pre, err := maybePrefetchSpend(r.Context(), req.Prompt); err == nil && pre != "" {
+			prefetchedContext = pre
+			basePrompt = pre + "\n\n" + basePrompt
+		}
 	}
 	fullPrompt := basePrompt
 	if mcpContext != "" {
@@ -85,6 +94,7 @@ type LLMRequest struct {
 	Prompt    string          `json:"prompt"`
 	Model     string          `json:"model,omitempty"`
 	MCPConfig json.RawMessage `json:"mcpConfig,omitempty"`
+	Prefetch  *bool           `json:"prefetch,omitempty"`
 }
 
 type LLMResponse struct {
@@ -127,6 +137,26 @@ func maybePrefetchSpend(ctx context.Context, prompt string) (string, error) {
 		parts = append(parts, fmt.Sprintf("agency=%s", agency))
 	}
 	return strings.Join(parts, " | "), nil
+}
+
+// maybePrefetchComparison handles prompts asking to compare spend between two agencies.
+func maybePrefetchComparison(ctx context.Context, prompt string) (string, error) {
+	left, right := parseCompareAgencies(prompt)
+	if left == "" || right == "" {
+		return "", nil
+	}
+	lookback := 20
+	leftReq := collector.SearchRequest{Agency: left, LookbackYears: lookback}
+	rightReq := collector.SearchRequest{Agency: right, LookbackYears: lookback}
+	leftRes, _, err := collector.RunSearchWithCache(ctx, leftReq)
+	if err != nil {
+		return "", err
+	}
+	rightRes, _, err := collector.RunSearchWithCache(ctx, rightReq)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Prefetched comparison over the last %d years: %s=%s | %s=%s", lookback, left, leftRes, right, rightRes), nil
 }
 
 // parseSpendQuery extracts company and agency from common spend prompts.
