@@ -145,6 +145,11 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 		return "", false, err
 	}
 
+	// If we have a cache hit and a recent checkpoint, short-circuit to avoid unnecessary fetches.
+	if cacheHit && !resumeFrom.IsZero() && time.Since(resumeFrom) < 24*time.Hour && start.Equal(resumeFrom) && end.IsZero() {
+		return formatMoneyDecimal(cachedTotal), true, nil
+	}
+
 	sink, err := cache.newParquetSink(partitionKey(time.Now(), req.Agency))
 	if err != nil {
 		return "", cacheHit, err
@@ -355,7 +360,25 @@ func (m *cacheManager) queryCache(filters SearchRequest) (decimal.Decimal, bool,
 		if err != nil {
 			continue
 		}
-		r := parquet.NewGenericReader[parquetRow](f)
+		info, statErr := f.Stat()
+		if statErr != nil || info.Size() == 0 {
+			_ = f.Close()
+			continue
+		}
+
+		var r *parquet.GenericReader[parquetRow]
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					r = nil
+				}
+			}()
+			r = parquet.NewGenericReader[parquetRow](f)
+		}()
+		if r == nil {
+			_ = f.Close()
+			continue
+		}
 		batch := make([]parquetRow, 1024)
 		for {
 			n, err := r.Read(batch)

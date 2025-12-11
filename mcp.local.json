@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "servers": {
+    "austender-local": {
+      "transport": "http",
+      "endpoint": "http://localhost:8080/api/mcp",
+      "metadata": {
+        "description": "Local Austender MCP server exposing aggregate_contracts and proxy_ocds tools"
+      }
+    }
+  },
+  "llm": {
+    "endpoint": "http://localhost:8080/api/llm",
+    "defaultModel": "gpt-4o-mini",
+    "notes": "POST prompt/model/mcpConfig to this endpoint; set OPENAI_API_KEY or compatible provider envs"
+  }
+}

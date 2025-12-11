@@ -208,4 +208,5 @@ func RegisterHandlers() {
 	mcpHandler := buildMCPHTTPHandler()
 	http.Handle("/api/mcp", mcpHandler)
 	http.Handle("/api/mcp/", mcpHandler)
+	http.HandleFunc("/api/llm", llmHandler)
 }
