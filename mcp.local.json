@@ -7,6 +7,17 @@
       "metadata": {
         "description": "Local Austender MCP server exposing aggregate_contracts and proxy_ocds tools"
       }
+    },
+    "puppeteer": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-puppeteer"
+      ],
+      "metadata": {
+        "description": "Headless browser MCP for DOM inspection and scraping via Puppeteer"
+      }
     }
   },
   "llm": {

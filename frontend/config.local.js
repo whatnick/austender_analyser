@@ -3,9 +3,19 @@
 window.APP_CONFIG = {
   apiBase: 'http://localhost:8080',
   // Optional MCP config passed to /api/llm when the toggle is on.
-  // Replace with the path or contents of your MCP config. Example keeps it simple
-  // by pointing at the local server MCP endpoint.
+  // This mirrors mcp.local.json and adds a Puppeteer MCP server via npx.
   mcpConfig: {
-    endpoint: 'http://localhost:8080/api/mcp'
+    version: '1.0',
+    servers: {
+      'austender-local': {
+        transport: 'http',
+        endpoint: 'http://localhost:8080/api/mcp'
+      },
+      puppeteer: {
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-puppeteer']
+      }
+    }
   }
 };
