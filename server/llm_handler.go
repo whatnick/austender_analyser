@@ -139,15 +139,23 @@ func maybePrefetchSpend(ctx context.Context, prompt string) (string, error) {
 	return strings.Join(parts, " | "), nil
 }
 
-// maybePrefetchComparison handles prompts asking to compare spend between two agencies.
+// maybePrefetchComparison handles prompts asking to compare spend between two agencies or two companies.
 func maybePrefetchComparison(ctx context.Context, prompt string) (string, error) {
-	left, right := parseCompareAgencies(prompt)
-	if left == "" || right == "" {
+	leftAgency, rightAgency := parseCompareAgencies(prompt)
+	leftCo, rightCo := parseCompareCompanies(prompt)
+
+	switch {
+	case leftAgency != "" && rightAgency != "":
+		return prefetchTwo(ctx, collector.SearchRequest{Agency: leftAgency, LookbackYears: 20}, collector.SearchRequest{Agency: rightAgency, LookbackYears: 20})
+	case leftCo != "" && rightCo != "":
+		return prefetchTwo(ctx, collector.SearchRequest{Company: leftCo, LookbackYears: 20}, collector.SearchRequest{Company: rightCo, LookbackYears: 20})
+	default:
 		return "", nil
 	}
-	lookback := 20
-	leftReq := collector.SearchRequest{Agency: left, LookbackYears: lookback}
-	rightReq := collector.SearchRequest{Agency: right, LookbackYears: lookback}
+}
+
+func prefetchTwo(ctx context.Context, leftReq, rightReq collector.SearchRequest) (string, error) {
+	lookback := leftReq.LookbackYears
 	leftRes, _, err := collector.RunSearchWithCache(ctx, leftReq)
 	if err != nil {
 		return "", err
@@ -156,7 +164,20 @@ func maybePrefetchComparison(ctx context.Context, prompt string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Prefetched comparison over the last %d years: %s=%s | %s=%s", lookback, left, leftRes, right, rightRes), nil
+	leftLabel := labelForReq(leftReq)
+	rightLabel := labelForReq(rightReq)
+	return fmt.Sprintf("Prefetched comparison over the last %d years: %s=%s | %s=%s", lookback, leftLabel, leftRes, rightLabel, rightRes), nil
+}
+
+func labelForReq(r collector.SearchRequest) string {
+	switch {
+	case r.Agency != "":
+		return r.Agency
+	case r.Company != "":
+		return r.Company
+	default:
+		return ""
+	}
 }
 
 // parseSpendQuery extracts company and agency from common spend prompts.
@@ -195,6 +216,56 @@ func normalizeEntity(v string) string {
 		return ""
 	}
 	return strings.Title(strings.ToLower(v))
+}
+
+// parseCompareAgencies tries to extract two agencies from comparison phrasing without regex.
+// Example: "Compare how much was spent by Home Affairs with how much was spent by Department of Defence".
+func parseCompareAgencies(prompt string) (string, string) {
+	p := strings.TrimSpace(prompt)
+	if p == "" {
+		return "", ""
+	}
+	lower := strings.ToLower(p)
+	if !strings.Contains(lower, "compare") || !strings.Contains(lower, "with") || !strings.Contains(lower, "spent by") {
+		return "", ""
+	}
+	parts := strings.SplitN(p, " with ", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	left := extractAfter(parts[0], "spent by")
+	right := extractAfter(parts[1], "spent by")
+	return normalizeEntity(left), normalizeEntity(right)
+}
+
+// parseCompareCompanies tries to extract two companies from comparison phrasing.
+// Example: "Compare how much was spent on KPMG with how much was spent on Deloitte".
+func parseCompareCompanies(prompt string) (string, string) {
+	p := strings.TrimSpace(prompt)
+	if p == "" {
+		return "", ""
+	}
+	lower := strings.ToLower(p)
+	if !strings.Contains(lower, "compare") || !strings.Contains(lower, "with") || !strings.Contains(lower, "spent on") {
+		return "", ""
+	}
+	parts := strings.SplitN(p, " with ", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	left := extractAfter(parts[0], "spent on")
+	right := extractAfter(parts[1], "spent on")
+	return normalizeEntity(left), normalizeEntity(right)
+}
+
+// extractAfter returns the substring after the last occurrence of marker.
+func extractAfter(s, marker string) string {
+	lower := strings.ToLower(s)
+	idx := strings.LastIndex(lower, marker)
+	if idx == -1 {
+		return ""
+	}
+	return strings.TrimSpace(s[idx+len(marker):])
 }
 
 // Helper to detect available MCP config path via env for defaults.

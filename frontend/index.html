@@ -8,6 +8,11 @@
     <script src="./config.local.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/json-enc.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.1/dist/markdown-it.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/markdown-it-katex@2.0.3/index.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <style>
         body { background: linear-gradient(135deg, #f7f9fc 0%, #eef2f7 100%); }
@@ -56,7 +61,7 @@
     </div>
 
     <script>
-        (function() {
+        document.addEventListener('DOMContentLoaded', function() {
             var apiBase = (window.APP_CONFIG && window.APP_CONFIG.apiBase) || 'http://localhost:8080';
             var mcpConfig = (window.APP_CONFIG && window.APP_CONFIG.mcpConfig) || null;
             var form = document.getElementById('chat-form');
@@ -65,6 +70,52 @@
             var sendBtn = document.getElementById('sendBtn');
             var statusEl = document.getElementById('status-msg');
             var toggleMcp = document.getElementById('toggle-mcp');
+
+            // Rich renderer: markdown-it + katex + DOMPurify with re-render once deps load
+            var md;
+            var pendingRenders = [];
+            function tryInitRenderer() {
+                if (!md && window.markdownit && window.markdownitKatex && window.DOMPurify && window.katex) {
+                    md = window.markdownit({
+                        html: false,
+                        linkify: true,
+                        breaks: true
+                    }).use(window.markdownitKatex, { throwOnError: false, output: 'html' });
+                    flushPending();
+                }
+            }
+            function normalizeMathDelimiters(text) {
+                if (!text) return text;
+                // Convert \[ ... \] to $$ ... $$ for consistent katex parsing.
+                return text.replace(/\\\[/g, '$$').replace(/\\\]/g, '$$');
+            }
+
+            function renderInto(el, text) {
+                if (!text) {
+                    el.innerHTML = '';
+                    return;
+                }
+                var source = normalizeMathDelimiters(text);
+                if (!md) {
+                    el.textContent = source;
+                    pendingRenders.push({ el: el, text: source });
+                    return;
+                }
+                el.innerHTML = window.DOMPurify.sanitize(md.render(source));
+            }
+            function flushPending() {
+                if (!md) return;
+                pendingRenders.forEach(function(item) {
+                    item.el.innerHTML = window.DOMPurify.sanitize(md.render(item.text));
+                });
+                pendingRenders = [];
+            }
+            // Poll briefly until renderer is ready (deferred scripts)
+            var rendererInterval = setInterval(function() {
+                tryInitRenderer();
+                if (md) clearInterval(rendererInterval);
+            }, 50);
+            setTimeout(function(){ if (!md) tryInitRenderer(); }, 2000);
 
             function appendMessage(role, text, context) {
                 var wrapper = document.createElement('div');
@@ -75,7 +126,7 @@
                 roleEl.textContent = role;
 
                 var textEl = document.createElement('div');
-                textEl.textContent = text;
+                renderInto(textEl, text);
 
                 wrapper.appendChild(roleEl);
                 wrapper.appendChild(textEl);
@@ -83,7 +134,7 @@
                 if (context) {
                     var ctxEl = document.createElement('div');
                     ctxEl.className = 'context';
-                    ctxEl.textContent = 'Context: ' + context;
+                    renderInto(ctxEl, 'Context: ' + context);
                     wrapper.appendChild(ctxEl);
                 }
 
@@ -123,7 +174,7 @@
                 promptEl.value = '';
                 sendPrompt(prompt);
             });
-        })();
+        });
     </script>
 </body>
 </html>
