@@ -95,9 +95,13 @@ type LLMResponse struct {
 // Patterns:
 // 1) "how much did {agency} spend on {company}"
 // 2) "how much was spent on {company} by {agency}" (agency optional)
+// 3) "how much was spent by {agency}" (agency only)
+// 4) "how much did {agency} spend" (agency only)
 var (
-	spendAgencyRe = regexp.MustCompile(`(?i)how\s+much\s+did\s+(.+?)\s+spend\s+on\s+([\w\s&\-\.]+)`)            // agency, company
-	spendOnRe     = regexp.MustCompile(`(?i)how\s+much\s+was\s+spent\s+on\s+([\w\s&\-\.]+)(?:\s+by\s+(.+?))?$`) // company, optional agency
+	spendAgencyRe     = regexp.MustCompile(`(?i)how\s+much\s+did\s+(.+?)\s+spend\s+on\s+([\w\s&\-\.]+)`)            // agency, company
+	spendOnRe         = regexp.MustCompile(`(?i)how\s+much\s+was\s+spent\s+on\s+([\w\s&\-\.]+)(?:\s+by\s+(.+?))?$`) // company, optional agency
+	spendByAgencyRe   = regexp.MustCompile(`(?i)how\s+much\s+was\s+spent\s+by\s+(.+?)\??$`)                         // agency only
+	spendAgencyOnlyRe = regexp.MustCompile(`(?i)how\s+much\s+did\s+(.+?)\s+spend\??$`)                              // agency only
 )
 
 // maybePrefetchSpend tries to answer spend questions by querying the collector cache (20-year lookback).
@@ -141,6 +145,14 @@ func parseSpendQuery(prompt string) (company string, agency string) {
 		if len(m) >= 3 {
 			agency = normalizeEntity(m[2])
 		}
+		return
+	}
+	if m := spendByAgencyRe.FindStringSubmatch(p); len(m) == 2 {
+		agency = normalizeEntity(m[1])
+		return
+	}
+	if m := spendAgencyOnlyRe.FindStringSubmatch(p); len(m) == 2 {
+		agency = normalizeEntity(m[1])
 	}
 	return
 }
