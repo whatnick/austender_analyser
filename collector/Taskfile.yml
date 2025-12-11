@@ -23,3 +23,17 @@ tasks:
           ARGS="--c Accenture"
         fi
         go run . $ARGS
+
+  build:
+    desc: Build collector binary into ../dist/collector
+    cmds:
+      - mkdir -p ../dist
+      - go build -o ../dist/collector .
+
+  prime-lake:
+    desc: Prime the parquet lake/catalog then reindex (pass flags after --, filters optional)
+    cmds:
+      - |
+        cache_dir="${AUSTENDER_CACHE_DIR:-$HOME/.cache/austender}"
+        go run . cache {{.CLI_ARGS}}
+        go run . reindex-lake --cache-dir "$cache_dir"

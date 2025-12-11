@@ -43,7 +43,10 @@ type ocdsProxyParams struct {
 }
 
 // function indirection for easier testing
-var runScrape = collector.RunSearchPreferCache
+var runScrape = func(ctx context.Context, req collector.SearchRequest) (string, error) {
+	res, _, err := collector.RunSearchWithCache(ctx, req)
+	return res, err
+}
 
 func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
@@ -55,12 +58,10 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var req ScrapeRequest
 	decErr := json.NewDecoder(r.Body).Decode(&req)
-	if decErr != nil || req.Keyword == "" {
+	if decErr != nil {
 		// Fallback to form values (e.g., if frontend posted URL-encoded)
 		_ = r.ParseForm()
-		if req.Keyword == "" {
-			req.Keyword = r.Form.Get("keyword")
-		}
+		req.Keyword = r.Form.Get("keyword")
 		if req.Company == "" {
 			req.Company = r.Form.Get("company")
 		}
@@ -70,11 +71,11 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		if req.Agency == "" {
 			req.Agency = r.Form.Get("agency")
 		}
-		if req.Keyword == "" {
-			log.Printf("bad request: decodeErr=%v method=%s path=%s", decErr, r.Method, r.URL.Path)
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
+	}
+
+	// If keyword still missing, allow empty to support full-lake prime queries.
+	if req.Keyword == "" {
+		req.Keyword = r.Form.Get("keyword")
 	}
 
 	if req.StartDate == "" {

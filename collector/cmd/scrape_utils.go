@@ -35,15 +35,17 @@ var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // SearchRequest defines all supported filters when querying the OCDS API.
 type SearchRequest struct {
-	Keyword       string
-	Company       string
-	Agency        string
-	StartDate     time.Time
-	EndDate       time.Time
-	DateType      string
-	LookbackYears int
-	OnMatch       MatchHandler
-	OnProgress    ProgressHandler
+	Keyword           string
+	Company           string
+	Agency            string
+	StartDate         time.Time
+	EndDate           time.Time
+	DateType          string
+	LookbackYears     int
+	OnMatch           MatchHandler
+	OnProgress        ProgressHandler
+	OnAnyMatch        MatchHandler              // called for every valued release, regardless of filters
+	ShouldFetchWindow func(win dateWindow) bool // optional gate to skip a date window
 }
 
 // MatchHandler streams each matching contract summary when verbose output is enabled.
@@ -122,12 +124,14 @@ type contractAggregate struct {
 type contractAggregator struct {
 	filters    SearchRequest
 	aggregates map[string]contractAggregate
+	sink       MatchHandler
 }
 
-func newContractAggregator(req SearchRequest) *contractAggregator {
+func newContractAggregator(req SearchRequest, sink MatchHandler) *contractAggregator {
 	return &contractAggregator{
 		filters:    req,
 		aggregates: make(map[string]contractAggregate),
+		sink:       sink,
 	}
 }
 
@@ -144,23 +148,34 @@ func (a *contractAggregator) process(rel ocdsRelease) {
 		return
 	}
 	releaseTime := parseReleaseTime(rel.Date)
+	summary := MatchSummary{
+		ContractID:  contractID,
+		ReleaseID:   rel.ID,
+		OCID:        rel.OCID,
+		Supplier:    primarySupplier(rel),
+		Agency:      primaryAgency(rel),
+		Title:       contractTitle(rel),
+		Amount:      amount,
+		ReleaseDate: releaseTime,
+	}
+
+	// Always write to sink for cache/lake population regardless of user filters.
+	if a.sink != nil {
+		a.sink(summary)
+	}
+
+	if !matchesFilters(rel, a.filters) {
+		return
+	}
+
 	entry, exists := a.aggregates[contractID]
 	if exists && !releaseTime.After(entry.UpdatedAt) {
 		return
 	}
 	a.aggregates[contractID] = contractAggregate{Value: amount, UpdatedAt: releaseTime}
 	if a.filters.OnMatch != nil {
-		a.filters.OnMatch(MatchSummary{
-			ContractID:  contractID,
-			ReleaseID:   rel.ID,
-			OCID:        rel.OCID,
-			Supplier:    primarySupplier(rel),
-			Agency:      primaryAgency(rel),
-			Title:       contractTitle(rel),
-			Amount:      amount,
-			ReleaseDate: releaseTime,
-			IsUpdate:    exists,
-		})
+		summary.IsUpdate = exists
+		a.filters.OnMatch(summary)
 	}
 }
 
@@ -206,8 +221,8 @@ func RunSearch(ctx context.Context, req SearchRequest) (string, error) {
 		maxConcurrent: defaultMaxConcurrency,
 	}
 
-	agg := newContractAggregator(req)
-	if err := client.fetchAll(ctx, start, end, agg.process, req.OnProgress); err != nil {
+	agg := newContractAggregator(req, req.OnAnyMatch)
+	if err := client.fetchAll(ctx, start, end, agg.process, req.OnProgress, req.ShouldFetchWindow); err != nil {
 		return "", err
 	}
 
@@ -225,7 +240,7 @@ func RunScrape(keywordVal, companyName, agencyVal string) (string, error) {
 	})
 }
 
-func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time, consume func(ocdsRelease), onProgress ProgressHandler) error {
+func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time, consume func(ocdsRelease), onProgress ProgressHandler, shouldFetch func(dateWindow) bool) error {
 	windows := splitDateWindows(start, end, maxWindowDays)
 	if len(windows) == 0 {
 		return nil
@@ -248,8 +263,14 @@ func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time, consume
 	resCh := make(chan result, len(windows))
 	sem := make(chan struct{}, c.concurrencyLimit())
 	var wg sync.WaitGroup
+	completed := 0
 
 	for idx, window := range windows {
+		if shouldFetch != nil && !shouldFetch(window) {
+			completed++
+			notifyProgress(completed)
+			continue
+		}
 		wg.Add(1)
 		go func(i int, win dateWindow) {
 			defer wg.Done()
@@ -272,8 +293,6 @@ func (c *ocdsClient) fetchAll(ctx context.Context, start, end time.Time, consume
 		wg.Wait()
 		close(resCh)
 	}()
-
-	completed := 0
 	for res := range resCh {
 		if res.err != nil && !errors.Is(res.err, context.Canceled) {
 			return res.err
@@ -577,7 +596,7 @@ func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time
 	if progressWriter != nil {
 		defer progressWriter.Finish()
 	}
-	result, err := RunSearch(context.Background(), SearchRequest{
+	result, cacheHit, err := RunSearchWithCache(context.Background(), SearchRequest{
 		Keyword:       keywordVal,
 		Company:       companyName,
 		Agency:        agencyVal,
@@ -593,6 +612,10 @@ func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time
 		return
 	}
 	totalStyle := color.New(color.FgRed, color.Bold)
+	if cacheHit {
+		fmt.Printf("Total Contract (cache): %s\n", totalStyle.Sprint(result))
+		return
+	}
 	fmt.Printf("Total Contract: %s\n", totalStyle.Sprint(result))
 }
 

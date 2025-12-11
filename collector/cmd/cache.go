@@ -9,14 +9,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/leekchan/accounting"
-	"github.com/parquet-go/parquet-go"
-	"github.com/parquet-go/parquet-go/compress/snappy"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
@@ -38,10 +35,6 @@ var cacheCmd = &cobra.Command{
 		noCache, _ := cmd.Flags().GetBool("no-cache")
 		startRaw, _ := cmd.Flags().GetString("start-date")
 		endRaw, _ := cmd.Flags().GetString("end-date")
-
-		if keyword == "" {
-			return errors.New("keyword is required")
-		}
 
 		start, err := parseDateFlag(startRaw)
 		if err != nil {
@@ -88,12 +81,7 @@ var cacheCmd = &cobra.Command{
 			start = resumeFrom
 		}
 
-		sink, err := cache.newParquetSink(partitionKey(time.Now(), agency))
-		if err != nil {
-			return err
-		}
-		defer sink.close()
-
+		pool := newLakeWriterPool(cache.lake)
 		_, err = RunSearch(context.Background(), SearchRequest{
 			Keyword:       keyword,
 			Company:       company,
@@ -102,8 +90,14 @@ var cacheCmd = &cobra.Command{
 			EndDate:       end,
 			DateType:      dateType,
 			LookbackYears: lookbackYears,
-			OnMatch:       sink.write,
+			OnAnyMatch: func(ms MatchSummary) {
+				_ = pool.write(ms)
+			},
+			ShouldFetchWindow: func(win dateWindow) bool {
+				return cache.lake.shouldFetchWindow(win)
+			},
 		})
+		pool.closeAll()
 		if err != nil {
 			return err
 		}
@@ -118,7 +112,8 @@ var cacheCmd = &cobra.Command{
 
 // RunSearchWithCache prefers cached totals when available, then fetches and appends
 // new data beyond the stored checkpoint. It returns the combined formatted total and
-// indicates whether a cache hit was used.
+// indicates whether a cache hit was used. Callers can supply OnMatch/OnProgress in req;
+// they will be invoked for fresh scans and results will also be written to the lake.
 func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, error) {
 	useCache := strings.ToLower(strings.TrimSpace(os.Getenv("AUSTENDER_USE_CACHE")))
 	if useCache == "false" || useCache == "0" {
@@ -150,11 +145,14 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 		return formatMoneyDecimal(cachedTotal), true, nil
 	}
 
-	sink, err := cache.newParquetSink(partitionKey(time.Now(), req.Agency))
-	if err != nil {
-		return "", cacheHit, err
+	pool := newLakeWriterPool(cache.lake)
+	userOnMatch := req.OnMatch
+	mergedOnMatch := func(summary MatchSummary) {
+		if userOnMatch != nil {
+			userOnMatch(summary)
+		}
+		_ = pool.write(summary)
 	}
-	defer sink.close()
 
 	incStr, err := RunSearch(ctx, SearchRequest{
 		Keyword:       req.Keyword,
@@ -164,11 +162,20 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 		EndDate:       end,
 		DateType:      req.DateType,
 		LookbackYears: req.LookbackYears,
-		OnMatch:       sink.write,
+		OnMatch:       mergedOnMatch,
+		OnAnyMatch: func(ms MatchSummary) {
+			_ = pool.write(ms)
+		},
+		OnProgress: req.OnProgress,
+		ShouldFetchWindow: func(win dateWindow) bool {
+			return cache.lake.shouldFetchWindow(win)
+		},
 	})
 	if err != nil {
 		return "", cacheHit, err
 	}
+
+	pool.closeAll()
 
 	incDec, err := parseMoneyToDecimal(incStr)
 	if err != nil {
@@ -207,6 +214,7 @@ func init() {
 type cacheManager struct {
 	baseDir string
 	db      *sql.DB
+	lake    *dataLake
 }
 
 func formatMoneyDecimal(v decimal.Decimal) string {
@@ -237,6 +245,7 @@ func newCacheManager(baseDir string) (*cacheManager, error) {
 		return nil, err
 	}
 	mgr := &cacheManager{baseDir: baseDir, db: db}
+	mgr.lake = newDataLake(baseDir, db)
 	if err := mgr.ensureSchema(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -257,8 +266,10 @@ func (m *cacheManager) ensureSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_partitions_key ON partitions(partition_key);
 	`
-	_, err := m.db.Exec(schema)
-	return err
+	if _, err := m.db.Exec(schema); err != nil {
+		return err
+	}
+	return m.lake.ensureSchema()
 }
 
 func (m *cacheManager) close() {
@@ -304,6 +315,31 @@ func partitionKey(ts time.Time, agency string) string {
 	return filepath.Join(fy, fmt.Sprintf("agency=%s", ag))
 }
 
+// partitionKeyLake builds a richer partition including company for the lake layout.
+func partitionKeyLake(ts time.Time, agency, company string) string {
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	fy := financialYearLabel(ts)
+	month := monthLabel(ts)
+	ag := sanitizePartitionComponent(agency)
+	if ag == "" {
+		ag = "unknown_agency"
+	}
+	co := sanitizePartitionComponent(company)
+	if co == "" {
+		co = "unknown_company"
+	}
+	return filepath.Join(fy, month, fmt.Sprintf("agency=%s", ag), fmt.Sprintf("company=%s", co))
+}
+
+func monthLabel(ts time.Time) string {
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	return fmt.Sprintf("month=%04d-%02d", ts.Year(), ts.Month())
+}
+
 func financialYearLabel(ts time.Time) string {
 	year := ts.Year()
 	if ts.Month() < time.July {
@@ -324,117 +360,16 @@ func sanitizePartitionComponent(v string) string {
 	return v
 }
 
-func (m *cacheManager) newParquetSink(partition string) (*parquetSink, error) {
-	dir := filepath.Join(m.baseDir, "parquet", partition)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(dir, fmt.Sprintf("part-%d.parquet", time.Now().Unix()))
-	f, err := os.Create(path)
-	if err != nil {
-		return nil, err
-	}
-	w := parquet.NewGenericWriter[parquetRow](f, parquet.Compression(&snappy.Codec{}))
-	if _, err := m.db.Exec("INSERT OR IGNORE INTO partitions(partition_key, path, created_at) VALUES(?, ?, ?)", partition, path, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return &parquetSink{w: w, file: f}, nil
+func (m *cacheManager) newParquetSink(ts time.Time, agency, company string) (*lakeSink, error) {
+	return m.lake.newSink(ts, agency, company)
 }
 
 func (m *cacheManager) queryCache(filters SearchRequest) (decimal.Decimal, bool, error) {
-	rows, err := m.db.Query("SELECT path FROM partitions")
+	res, matched, err := m.lake.queryTotals(context.Background(), filters)
 	if err != nil {
 		return decimal.Zero, false, err
 	}
-	defer rows.Close()
-
-	var total decimal.Decimal
-	matched := false
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			return decimal.Zero, false, err
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		info, statErr := f.Stat()
-		if statErr != nil || info.Size() == 0 {
-			_ = f.Close()
-			continue
-		}
-
-		var r *parquet.GenericReader[parquetRow]
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					r = nil
-				}
-			}()
-			r = parquet.NewGenericReader[parquetRow](f)
-		}()
-		if r == nil {
-			_ = f.Close()
-			continue
-		}
-		batch := make([]parquetRow, 1024)
-		for {
-			n, err := r.Read(batch)
-			if n > 0 {
-				for _, row := range batch[:n] {
-					if rowMatches(row, filters) {
-						matched = true
-						total = total.Add(decimal.NewFromFloat(row.Amount))
-					}
-				}
-			}
-			if err != nil {
-				break
-			}
-		}
-		_ = r.Close()
-		_ = f.Close()
-	}
-	return total, matched, nil
-}
-
-type parquetSink struct {
-	w    *parquet.GenericWriter[parquetRow]
-	file *os.File
-	mu   sync.Mutex
-}
-
-func (s *parquetSink) write(ms MatchSummary) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	row := parquetRow{
-		Partition:     partitionKey(ms.ReleaseDate, ms.Agency),
-		FinancialYear: financialYearLabel(ms.ReleaseDate),
-		AgencyKey:     sanitizePartitionComponent(ms.Agency),
-		ContractID:    ms.ContractID,
-		ReleaseID:     ms.ReleaseID,
-		OCID:          ms.OCID,
-		Supplier:      ms.Supplier,
-		Agency:        ms.Agency,
-		Title:         ms.Title,
-		Amount:        ms.Amount.InexactFloat64(),
-		ReleaseEpoch:  ms.ReleaseDate.UnixMilli(),
-		IsUpdate:      ms.IsUpdate,
-	}
-	_, _ = s.w.Write([]parquetRow{row})
-}
-
-func (s *parquetSink) close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.w != nil {
-		_ = s.w.Close()
-	}
-	if s.file != nil {
-		_ = s.file.Close()
-	}
+	return res.total, matched, nil
 }
 
 func rowMatches(row parquetRow, filters SearchRequest) bool {
@@ -461,6 +396,7 @@ type parquetRow struct {
 	Partition     string  `parquet:"name=partition, type=BYTE_ARRAY, convertedtype=UTF8"`
 	FinancialYear string  `parquet:"name=financial_year, type=BYTE_ARRAY, convertedtype=UTF8"`
 	AgencyKey     string  `parquet:"name=agency_key, type=BYTE_ARRAY, convertedtype=UTF8"`
+	CompanyKey    string  `parquet:"name=company_key, type=BYTE_ARRAY, convertedtype=UTF8"`
 	ContractID    string  `parquet:"name=contract_id, type=BYTE_ARRAY, convertedtype=UTF8"`
 	ReleaseID     string  `parquet:"name=release_id, type=BYTE_ARRAY, convertedtype=UTF8"`
 	OCID          string  `parquet:"name=ocid, type=BYTE_ARRAY, convertedtype=UTF8"`

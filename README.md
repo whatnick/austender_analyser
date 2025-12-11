@@ -3,20 +3,17 @@ There is always news around how much the government spends on contracting. Howev
 to find a quick summary of figures in a transparent manner without digging through Austender
 website, so public service report or relying on journalists' scraping skills.
 
-Set this up as a serverless go development project to answer spend questions by organization name e.g. KPMG had 5136 tenders awarded, what was the total value ?
+Serverless-first Go project that answers spend questions by organization/agency while persisting a reusable, partitioned Parquet lake for fast reuse.
 
 ![KPMG Tenders](docs/KPMG_result_2023_01_22.png)
 
 ## Features
-- CLI tool that scrapes for a keyword and returns roll-ups
-- Cobra params parsing
-- Standard 3-tier design (BE,FE,DB)
-- Backend implementation in Golang
-- Chat-style HTMX frontend hitting `/api/llm` with an optional MCP toggle for tool-aware responses; toggle also controls cache prefetch
-- Fuzzy name matching in Google "did you mean" style
-- Temporal aggregate spend on raw AUD values, not inflation adjusted (I am not an economist)
-- Serverless-ready infra in AWS (CDK stack for Lambda + API Gateway + S3 + CloudFront)
-- DynamoDB cache of Austender data downloadable as CSV
+- Collector CLI that scrapes OCDS releases and writes a partitioned Parquet lake with a SQLite catalog under `~/.cache/austender` (override via `AUSTENDER_CACHE_DIR`).
+- Month- and FY-partitioned lake layout (`fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>`); fetcher skips months already present in the lake to avoid re-downloading.
+- Server reuses collector logic and calls `RunSearchWithCache` by default, so API and MCP endpoints benefit from the lake and SQLite index.
+- Chat-style HTMX frontend hitting `/api/llm` with an MCP toggle; toggle also controls cache prefetch.
+- Temporal aggregate spend on raw AUD values (not inflation adjusted).
+- Serverless-ready infra in AWS (CDK stack for Lambda + API Gateway + S3 + CloudFront).
 
 
 ## Roadmap and Status
@@ -27,9 +24,8 @@ Set this up as a serverless go development project to answer spend questions by 
 - [x] Initial tests: server unit tests and infra assertions; helper scripts in `hack/`
 - [x] Go multi-module layout (collector, server, infra) with direct reuse of collector in server
 - [x] CI workflow to run tests across all components via `hack/test-all.sh`
-- [ ] Identify fields to cache from Austender and design persistence schema
-- [ ] Scheduled ingestion (cron) to populate DynamoDB/ClickHouse with Austender data
-- [ ] API enhancements for time ranges (all-time, last 5 years, last year) and filters (agency/company)
+- [x] Partitioned Parquet lake + SQLite catalog with month-level skip logic and reindex command
+- [ ] Scheduled ingestion/cron to keep the lake warm
 - [ ] Fuzzy name matching ("did you mean")
 - [ ] Frontend build/deploy pipeline (upload to S3, CloudFront invalidation) and richer UI
 - [ ] Performance, rate limiting, CORS, and basic auth hardening
@@ -40,28 +36,13 @@ Reference: https://github.com/golang-standards/project-layout
 
 The repository is organized as follows:
 
-- `collector/` - Go CLI tool for scraping Austender data. Contains main logic and command utilities.
-    - `cmd/` - Cobra command implementations and scraping utilities.
-    - `main.go` - Entry point for the CLI tool.
-    - `go.mod`, `go.sum` - Go module files.
-    - `README.md` - Collector-specific documentation.
-- `server/` - Backend server implementation in Go (local HTTP + AWS Lambda handler) that reuses the collector logic directly. Hosts `/api/scrape` and `/api/llm` plus MCP tools.
-    - `api.go`, `main.go`, `*_test.go` - API, entry point, and tests.
-    - `llm_handler.go` - LLM+MCP entry with optional cache prefetch via `prefetch` flag.
-    - `go.mod`, `go.sum` - Go module files for server.
-- `frontend/` - Static HTMX chat page posting to `/api/llm` with MCP toggle and cache prefetch control.
-- `docs/` - Documentation and result images.
-    - `KPMG_contracts_flood.png`, `KPMG_result_2023_01_22.png` - Example result images.
-    - `README.md` - Documentation for the project.
-- `infra/` - Infrastructure as code for deployment (e.g., AWS CDK).
-    - `infra.go`, `infra_test.go` - Go code for infrastructure.
-    - `cdk.json`, `cdk.out/` - CDK configuration and output files.
-    - `go.mod`, `go.sum` - Go module files for infra.
-    - `README.md` - Infra-specific documentation.
-- `query/` - Reserved for query logic and documentation.
-    - `README.md` - Query documentation.
-- `hack/` - Helper scripts, including `test-all.sh` to run tests across all modules.
-- `.github/workflows/` - CI pipeline that runs `hack/test-all.sh` on pushes and PRs.
+- `collector/` – CLI and shared scraping logic; writes/reads the Parquet lake and SQLite catalog.
+- `server/` – HTTP + Lambda entry that imports collector and defaults to cached lookups.
+- `frontend/` – Static HTMX chat page with MCP toggle and cache prefetch control.
+- `infra/` – AWS CDK stack for Lambda, API Gateway, S3, and CloudFront.
+- `docs/` – Onboarding and screenshots.
+- `hack/` – Helper scripts (`run-*`, `build-collector.sh`, `prime-datalake.sh`).
+- `Taskfile.yml` – Aggregates component Taskfiles (collector/server/infra) and adds `collector:prime-lake` / `collector:build` convenience tasks.
 
 Other files:
 - `LICENSE.md` - License information.
@@ -69,21 +50,25 @@ Other files:
 
 ## How to run locally
 
-Prereqs: Go 1.23+, a browser. Optional: Task (https://taskfile.dev/#/installation).
+Prereqs: Go 1.25+, a browser. Optional: Task (https://taskfile.dev/#/installation).
 
 - With Task (recommended):
     - Start API server: `task run:server`
     - Open frontend: `task run:frontend`
     - Start both: `task run:local`
     - Run all tests: `task test:all`
+    - Build collector: `task collector:build`
+    - Prime lake + reindex: `task collector:prime-lake -- --lookback-years 5` (filters optional)
 
 - With plain scripts:
     - Start API server (localhost:8080): `bash hack/run-server.sh`
     - Open the minimal frontend: `bash hack/run-frontend.sh`
     - Start both: `bash hack/run-local.sh`
+    - Build collector: `bash hack/build-collector.sh`
+    - Prime lake + reindex: `bash hack/prime-datalake.sh --lookback-years 5`
 
 API quick test (without frontend):
-- POST to `http://localhost:8080/api/scrape` with JSON body `{"keyword":"KPMG"}`; response is `{ "result": "$X.XX" }`.
+- POST to `http://localhost:8080/api/scrape` with JSON body `{"keyword":"KPMG"}`; response is `{ "result": "$X.XX" }`. Leave `keyword` empty to prime cache ranges.
 
 LLM/MCP quick test:
 - POST to `http://localhost:8080/api/llm` with `{ "prompt": "How much was spent by Department of Defence?", "prefetch": true }` to include cache context, or set `prefetch` false to skip collector queries. Attach `mcpConfig` JSON to allow the model to call tools.
@@ -95,9 +80,9 @@ LLM/MCP quick test:
 - Responses include any prefetched cache context when the server can answer locally.
 
 ### Architecture (high level)
-- The frontend is a static HTMX chat page. Each send posts JSON to `/api/llm` and optionally includes an MCP config and `prefetch` flag.
-- The server `llmHandler` parses prompts, optionally prefetches spend totals from the collector cache when `prefetch` is true, injects that context, and passes prompts to the selected LLM (OpenAI-compatible via langchaingo). MCP requests are forwarded as config so downstream agents can call tools.
-- The collector provides scraping/search helpers and cached parquet-backed spend lookups consumed by the server.
+- Collector fetches OCDS releases by date windows, writes all matches (not just filtered ones) into a Parquet lake partitioned by FY/month/agency/company, and maintains a SQLite catalog. Windows with existing month partitions are skipped.
+- Server imports collector and uses `RunSearchWithCache` by default for `/api/scrape` and `/api/llm` prefetch, so API calls leverage the lake without re-scraping.
+- Frontend is a static HTMX chat page posting to `/api/llm` with an MCP toggle; MCP config allows downstream agents to call tools.
 - Infra packages the server for Lambda/API Gateway and serves the static frontend via S3/CloudFront.
 
 ### Taskfile setup

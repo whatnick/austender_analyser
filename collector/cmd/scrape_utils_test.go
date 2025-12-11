@@ -63,7 +63,7 @@ func TestAggregateReleasesDedupesContracts(t *testing.T) {
 		},
 	}
 
-	agg := newContractAggregator(SearchRequest{})
+	agg := newContractAggregator(SearchRequest{}, nil)
 	for _, rel := range releases {
 		agg.process(rel)
 	}
@@ -94,7 +94,7 @@ func TestMatchHandlerReceivesStreamingUpdates(t *testing.T) {
 			summaries = append(summaries, summary)
 		},
 	}
-	agg := newContractAggregator(req)
+	agg := newContractAggregator(req, nil)
 	rel := ocdsRelease{
 		ID:   "rel-1",
 		Date: baseTime.Format(time.RFC3339),

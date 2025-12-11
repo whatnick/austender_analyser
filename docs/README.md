@@ -6,14 +6,15 @@ Welcome to the Austender Analyser project. This document captures the essentials
 
 - Answers “how much has the government spent with <keyword>?” by scraping [Austender](https://www.tenders.gov.au) and summarising the totals.
 - Provides a Go CLI (`collector`) for ad-hoc scraping, a Go HTTP/Lambda server (`server`) for API access, and AWS CDK IaC (`infra`) to deploy everything serverlessly.
-- Ships a minimal HTMX frontend (`frontend`) that hits `POST /api/scrape` for quick demos.
+- Ships a minimal HTMX frontend (`frontend`) that hits `POST /api/llm` for quick demos, with an MCP toggle and cache prefetch control.
+- Maintains a local Parquet lake + SQLite catalog under `~/.cache/austender`, partitioned by FY/month/agency/company, with skip logic to avoid re-downloading months already present.
 
 ## Architecture at a Glance
 
-- **Collector (`collector/`)** – Colly-based scraper + Cobra CLI. Exposes the scraping logic that the server imports via `github.com/whatnick/austender_analyser/collector`.
-- **Server (`server/`)** – HTTP handlers and `aws-lambda-go` proxy entry point. `AUSTENDER_MODE=local` runs an HTTP server on `:8080`; `AUSTENDER_MODE=lambda` serves API Gateway.
+- **Collector (`collector/`)** – Colly-based scraper + Cobra CLI. Exposes the scraping logic that the server imports via `github.com/whatnick/austender_analyser/collector`. Writes all valued releases into the Parquet lake and skips already-populated month partitions.
+- **Server (`server/`)** – HTTP handlers and `aws-lambda-go` proxy entry point. `AUSTENDER_MODE=local` runs an HTTP server on `:8080`; `AUSTENDER_MODE=lambda` serves API Gateway. Defaults to `RunSearchWithCache` so API/MCP calls leverage the lake.
 - **Infra (`infra/`)** – Go CDK stack that builds Lambda, API Gateway, S3 (static frontend), and CloudFront distribution. Uses `cdk.json` for context, default region `ap-southeast-1`.
-- **Frontend (`frontend/`)** – Static HTML/HTMX page plus `config.local.js` to point to `http://localhost:8080`.
+- **Frontend (`frontend/`)** – Static HTML/HTMX page plus `config.local.js` to point to `http://localhost:8080`; supports MCP toggle and cache prefetch flag to `/api/llm`.
 - **Hack scripts (`hack/`)** – Convenience shell scripts mirroring Task targets for local dev and CI (`hack/run-local.sh`, `hack/test-all.sh`, etc.).
 
 ## Daily Driver Commands

@@ -8,7 +8,7 @@
 - Keep the pipeline auditable end-to-end by publishing OCDS release packages and MCP tool schemas alongside every deployment artifact.
 
 ## 2. Architecture Snapshot
-- **collector/** – Colly-based scraper + Cobra CLI. Normalize every scrape into OCDS release + record structures and expose reusable helpers (`github.com/whatnick/austender_analyser/collector`) for other modules.
+- **collector/** – Colly-based scraper + Cobra CLI. Normalize every scrape into OCDS release + record structures and expose reusable helpers (`github.com/whatnick/austender_analyser/collector`) for other modules. Writes all valued releases into a partitioned Parquet lake (fy/month/agency/company) with a SQLite catalog and skips month windows already present.
 - **server/** – HTTP handlers + AWS Lambda proxy integration (uses `aws-lambda-go`). Controlled by `AUSTENDER_MODE` env: `local` for `:8080` server, `lambda` for API Gateway. Hosts the MCP-compatible tool surface defined in `server/mcp_server.go`.
 - **infra/** – AWS CDK (Go) stack building Lambda, API Gateway, S3 (static site), CloudFront, and minimal state buckets to ship OCDS JSON artifacts. Default region/account pulled from `aws sts get-caller-identity` and `ap-southeast-1`.
 - **frontend/** – Static HTMX chat page that calls `/api/llm`; includes a toggle to attach MCP config (and control cache prefetch) per request. `config.local.js` overrides API base and default MCP config for local runs.
@@ -32,6 +32,8 @@
 | Run both | `task run:local` | `bash hack/run-local.sh` |
 | All tests | `task test:all` | `bash hack/test-all.sh` |
 | Collector CLI | `task collector:run` (defaults to `--keyword Accenture`) | `cd collector && go run . --keyword KPMG` |
+| Build collector | `task collector:build` | `bash hack/build-collector.sh` |
+| Prime lake + reindex | `task collector:prime-lake -- --lookback-years 5` | `bash hack/prime-datalake.sh --lookback-years 5` |
 | Module tests | `task collector:test`, `task server:test`, `task infra:test` | `go test ./...` inside module |
 | Infra synth/deploy | `task infra:synth`, `task infra:deploy` | `cd infra && cdk synth|deploy` |
 
