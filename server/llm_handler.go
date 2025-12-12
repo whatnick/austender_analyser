@@ -16,6 +16,11 @@ import (
 	collector "github.com/whatnick/austender_analyser/collector/cmd"
 )
 
+// newLLMClient builds the LLM used by the handler. Overridden in integration tests.
+var newLLMClient = func(modelName string) (llms.Model, error) {
+	return openai.New(openai.WithModel(modelName))
+}
+
 // llmHandler accepts plain-text prompts and optional MCP server config to give the LLM
 // more structured context. It relies on langchaingo so any supported backend can be
 // swapped by changing the model name and env credentials (e.g., OpenAI-compatible APIs).
@@ -73,7 +78,7 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		fullPrompt = fmt.Sprintf("You can call MCP servers described by this JSON config (pass along to your agent tooling): %s\n\n%s", mcpContext, basePrompt)
 	}
 
-	client, err := openai.New(openai.WithModel(modelName))
+	client, err := newLLMClient(modelName)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("llm init failed: %v", err), http.StatusInternalServerError)
 		return

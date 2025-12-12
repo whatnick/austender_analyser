@@ -37,6 +37,12 @@ tasks:
     cmds:
       - go test ./... -v -cover
 
+  coverage:
+    desc: Server coverage (atomic)
+    cmds:
+      - go test ./... -covermode=atomic -coverprofile=coverage.out
+      - go tool cover -func=coverage.out | tail -n 1
+
   tidy:
     desc: Go mod tidy
     cmds:

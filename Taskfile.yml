@@ -47,4 +47,29 @@ tasks:
       - task: server:test
       - task: infra:test
 
+  coverage:collector:
+    desc: Collector coverage report (atomic)
+    cmds:
+      - cd collector && go test ./... -covermode=atomic -coverprofile=coverage.out
+      - cd collector && go tool cover -func=coverage.out | tail -n 1
+
+  coverage:server:
+    desc: Server coverage report (atomic)
+    cmds:
+      - cd server && go test ./... -covermode=atomic -coverprofile=coverage.out
+      - cd server && go tool cover -func=coverage.out | tail -n 1
+
+  coverage:infra:
+    desc: Infra coverage report (atomic)
+    cmds:
+      - cd infra && go test ./... -covermode=atomic -coverprofile=coverage.out
+      - cd infra && go tool cover -func=coverage.out | tail -n 1
+
+  coverage:all:
+    desc: Run coverage for collector, server, infra (no frontend)
+    cmds:
+      - task: coverage:collector
+      - task: coverage:server
+      - task: coverage:infra
+
  
