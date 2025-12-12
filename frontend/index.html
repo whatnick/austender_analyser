@@ -50,6 +50,11 @@
                 <label class="form-check-label" for="toggle-mcp">Enable MCP backend (includes config in the request)</label>
             </div>
 
+            <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="toggle-cache" checked>
+                <label class="form-check-label" for="toggle-cache">Use ducklake cache (prefetch hits local lake)</label>
+            </div>
+
             <div class="card chat-card mb-3">
                 <div class="card-body">
                     <div id="chat-log" class="chat-log" aria-live="polite"></div>
@@ -91,6 +96,7 @@
             var sendBtn = document.getElementById('sendBtn');
             var statusEl = document.getElementById('status-msg');
             var toggleMcp = document.getElementById('toggle-mcp');
+            var toggleCache = document.getElementById('toggle-cache');
             var lookbackInput = document.getElementById('lookback');
             var lookbackValueEl = document.getElementById('lookback-value');
 
@@ -178,7 +184,12 @@
 
             async function sendPrompt(prompt) {
                 var lookbackYears = parseInt(lookbackInput.value, 10) || 20;
-                var payload = { prompt: prompt, prefetch: !!toggleMcp.checked, lookbackYears: lookbackYears };
+                var payload = {
+                    prompt: prompt,
+                    prefetch: !!toggleMcp.checked,
+                    lookbackYears: lookbackYears,
+                    useCache: !!toggleCache.checked
+                };
                 if (toggleMcp.checked && mcpConfig) {
                     payload.mcpConfig = mcpConfig;
                 }

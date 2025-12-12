@@ -41,6 +41,10 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	if lookback <= 0 {
 		lookback = 20
 	}
+	useCache := true
+	if req.UseCache != nil {
+		useCache = *req.UseCache
+	}
 	prefetchAllowed := true
 	if req.Prefetch != nil {
 		prefetchAllowed = *req.Prefetch
@@ -65,10 +69,10 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	var prefetchedContext string
 	// If allowed and the prompt looks like a spend query, prefetch using the collector cache and inject context.
 	if prefetchAllowed {
-		if pre, err := maybePrefetchComparison(r.Context(), req.Prompt, lookback); err == nil && pre != "" {
+		if pre, err := maybePrefetchComparison(r.Context(), req.Prompt, lookback, useCache); err == nil && pre != "" {
 			prefetchedContext = pre
 			basePrompt = pre + "\n\n" + basePrompt
-		} else if pre, err := maybePrefetchSpend(r.Context(), req.Prompt, lookback); err == nil && pre != "" {
+		} else if pre, err := maybePrefetchSpend(r.Context(), req.Prompt, lookback, useCache); err == nil && pre != "" {
 			prefetchedContext = pre
 			basePrompt = pre + "\n\n" + basePrompt
 		}
@@ -105,6 +109,7 @@ type LLMRequest struct {
 	MCPConfig     json.RawMessage `json:"mcpConfig,omitempty"`
 	Prefetch      *bool           `json:"prefetch,omitempty"`
 	LookbackYears int             `json:"lookbackYears,omitempty"`
+	UseCache      *bool           `json:"useCache,omitempty"`
 }
 
 type LLMResponse struct {
@@ -124,8 +129,8 @@ var (
 	spendAgencyOnlyRe = regexp.MustCompile(`(?i)how\s+much\s+did\s+(.+?)\s+spend\??$`)                              // agency only
 )
 
-// maybePrefetchSpend tries to answer spend questions by querying the collector cache.
-func maybePrefetchSpend(ctx context.Context, prompt string, lookbackYears int) (string, error) {
+// maybePrefetchSpend tries to answer spend questions by querying the collector.
+func maybePrefetchSpend(ctx context.Context, prompt string, lookbackYears int, useCache bool) (string, error) {
 	if lookbackYears <= 0 {
 		lookbackYears = 20
 	}
@@ -138,7 +143,13 @@ func maybePrefetchSpend(ctx context.Context, prompt string, lookbackYears int) (
 		Agency:        agency,
 		LookbackYears: lookbackYears,
 	}
-	res, _, err := collector.RunSearchWithCache(ctx, req)
+	var res string
+	var err error
+	if useCache {
+		res, _, err = collector.RunSearchWithCache(ctx, req)
+	} else {
+		res, err = collector.RunSearch(ctx, req)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -153,7 +164,7 @@ func maybePrefetchSpend(ctx context.Context, prompt string, lookbackYears int) (
 }
 
 // maybePrefetchComparison handles prompts asking to compare spend between two agencies or two companies.
-func maybePrefetchComparison(ctx context.Context, prompt string, lookbackYears int) (string, error) {
+func maybePrefetchComparison(ctx context.Context, prompt string, lookbackYears int, useCache bool) (string, error) {
 	if lookbackYears <= 0 {
 		lookbackYears = 20
 	}
@@ -162,30 +173,38 @@ func maybePrefetchComparison(ctx context.Context, prompt string, lookbackYears i
 
 	switch {
 	case leftAgency != "" && rightAgency != "":
-		return prefetchTwo(ctx, collector.SearchRequest{Agency: leftAgency, LookbackYears: lookbackYears}, collector.SearchRequest{Agency: rightAgency, LookbackYears: lookbackYears})
+		return prefetchTwo(ctx, collector.SearchRequest{Agency: leftAgency, LookbackYears: lookbackYears}, collector.SearchRequest{Agency: rightAgency, LookbackYears: lookbackYears}, useCache)
 	case leftCo != "" && rightCo != "":
-		return prefetchTwo(ctx, collector.SearchRequest{Company: leftCo, LookbackYears: lookbackYears}, collector.SearchRequest{Company: rightCo, LookbackYears: lookbackYears})
+		return prefetchTwo(ctx, collector.SearchRequest{Company: leftCo, LookbackYears: lookbackYears}, collector.SearchRequest{Company: rightCo, LookbackYears: lookbackYears}, useCache)
 	default:
 		return "", nil
 	}
 }
 
-func prefetchTwo(ctx context.Context, leftReq, rightReq collector.SearchRequest) (string, error) {
+func prefetchTwo(ctx context.Context, leftReq, rightReq collector.SearchRequest, useCache bool) (string, error) {
 	lookback := leftReq.LookbackYears
 	if lookback <= 0 {
 		lookback = 20
 	}
-	leftRes, _, err := collector.RunSearchWithCache(ctx, leftReq)
+	leftRes, err := runSearchMaybeCache(ctx, leftReq, useCache)
 	if err != nil {
 		return "", err
 	}
-	rightRes, _, err := collector.RunSearchWithCache(ctx, rightReq)
+	rightRes, err := runSearchMaybeCache(ctx, rightReq, useCache)
 	if err != nil {
 		return "", err
 	}
 	leftLabel := labelForReq(leftReq)
 	rightLabel := labelForReq(rightReq)
 	return fmt.Sprintf("Prefetched comparison over the last %d years: %s=%s | %s=%s", lookback, leftLabel, leftRes, rightLabel, rightRes), nil
+}
+
+func runSearchMaybeCache(ctx context.Context, req collector.SearchRequest, useCache bool) (string, error) {
+	if useCache {
+		res, _, err := collector.RunSearchWithCache(ctx, req)
+		return res, err
+	}
+	return collector.RunSearch(ctx, req)
 }
 
 func labelForReq(r collector.SearchRequest) string {
