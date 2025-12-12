@@ -35,11 +35,14 @@ var cacheCmd = &cobra.Command{
 		company, _ := cmd.Flags().GetString("company")
 		agency, _ := cmd.Flags().GetString("agency")
 		dateType, _ := cmd.Flags().GetString("date-type")
+		source, _ := cmd.Flags().GetString("source")
 		lookbackYears, _ := cmd.Flags().GetInt("lookback-years")
 		cacheDir, _ := cmd.Flags().GetString("cache-dir")
 		noCache, _ := cmd.Flags().GetBool("no-cache")
 		startRaw, _ := cmd.Flags().GetString("start-date")
 		endRaw, _ := cmd.Flags().GetString("end-date")
+
+		source = normalizeSourceID(source)
 
 		start, err := parseDateFlag(startRaw)
 		if err != nil {
@@ -58,6 +61,7 @@ var cacheCmd = &cobra.Command{
 				Keyword:       keyword,
 				Company:       company,
 				Agency:        agency,
+				Source:        source,
 				StartDate:     start,
 				EndDate:       end,
 				DateType:      dateType,
@@ -72,7 +76,7 @@ var cacheCmd = &cobra.Command{
 		}
 		defer cache.close()
 
-		cachedTotal, cacheHit, err := cache.queryCache(SearchRequest{Keyword: keyword, Company: company, Agency: agency})
+		cachedTotal, cacheHit, err := cache.queryCache(SearchRequest{Keyword: keyword, Company: company, Agency: agency, Source: source})
 		if err != nil {
 			return err
 		}
@@ -80,7 +84,7 @@ var cacheCmd = &cobra.Command{
 			fmt.Printf("Cache result: %s (before refresh)\n", formatMoneyDecimal(cachedTotal))
 		}
 
-		checkpointKey := cacheKey(keyword, company, agency, dateType)
+		checkpointKey := cacheKey(keyword, company, agency, dateType, source)
 		resumeFrom, _ := cache.loadCheckpoint(checkpointKey)
 		if !resumeFrom.IsZero() && (start.IsZero() || resumeFrom.After(start)) {
 			start = resumeFrom
@@ -91,6 +95,7 @@ var cacheCmd = &cobra.Command{
 			Keyword:       keyword,
 			Company:       company,
 			Agency:        agency,
+			Source:        source,
 			StartDate:     start,
 			EndDate:       end,
 			DateType:      dateType,
@@ -99,7 +104,7 @@ var cacheCmd = &cobra.Command{
 				_ = pool.write(ms)
 			},
 			ShouldFetchWindow: func(win dateWindow) bool {
-				return cache.lake.shouldFetchWindow(win)
+				return cache.lake.shouldFetchWindow(source, win)
 			},
 		})
 		pool.closeAll()
@@ -128,9 +133,12 @@ var cacheCmd = &cobra.Command{
 func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, error) {
 	useCache := strings.ToLower(strings.TrimSpace(os.Getenv("AUSTENDER_USE_CACHE")))
 	if useCache == "false" || useCache == "0" {
+		req.Source = normalizeSourceID(req.Source)
 		res, err := runSearchFunc(ctx, req)
 		return res, false, err
 	}
+
+	resolvedSource := normalizeSourceID(req.Source)
 
 	cache, err := newCacheManager(defaultCacheDir())
 	if err != nil {
@@ -138,12 +146,13 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 	}
 	defer cache.close()
 
-	checkpointKey := cacheKey(req.Keyword, req.Company, req.Agency, req.DateType)
+	checkpointKey := cacheKey(req.Keyword, req.Company, req.Agency, req.DateType, resolvedSource)
 	_, _ = cache.loadCheckpoint(checkpointKey)
 	resolvedLookback := resolveLookbackYears(req.LookbackYears)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, resolvedLookback)
 
 	workingReq := req
+	workingReq.Source = resolvedSource
 	workingReq.StartDate = startResolved
 	workingReq.EndDate = endResolved
 	workingReq.LookbackYears = resolvedLookback
@@ -154,13 +163,16 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 	}
 
 	// If every window in range already exists in the lake, rely on the cached total.
-	if cacheHit && cache.lake != nil && windowsCached(cache.lake, startResolved, endResolved) {
+	if cacheHit && cache.lake != nil && windowsCached(cache.lake, resolvedSource, startResolved, endResolved) {
 		return formatMoneyDecimal(cachedTotal), true, nil
 	}
 
 	pool := newLakeWriterPool(cache.lake)
 	userOnMatch := req.OnMatch
 	mergedOnMatch := func(summary MatchSummary) {
+		if summary.Source == "" {
+			summary.Source = resolvedSource
+		}
 		if userOnMatch != nil {
 			userOnMatch(summary)
 		}
@@ -171,17 +183,21 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 		Keyword:       req.Keyword,
 		Company:       req.Company,
 		Agency:        req.Agency,
+		Source:        resolvedSource,
 		StartDate:     startResolved,
 		EndDate:       endResolved,
 		DateType:      req.DateType,
 		LookbackYears: resolvedLookback,
 		OnMatch:       mergedOnMatch,
 		OnAnyMatch: func(ms MatchSummary) {
+			if ms.Source == "" {
+				ms.Source = resolvedSource
+			}
 			_ = pool.write(ms)
 		},
 		OnProgress: req.OnProgress,
 		ShouldFetchWindow: func(win dateWindow) bool {
-			return cache.lake.shouldFetchWindow(win)
+			return cache.lake.shouldFetchWindow(resolvedSource, win)
 		},
 	})
 	if err != nil {
@@ -217,13 +233,14 @@ func RunSearchPreferCache(ctx context.Context, req SearchRequest) (string, error
 	return res, err
 }
 
-// windowsCached returns true when every date window between start and end already has a lake partition.
-func windowsCached(l *dataLake, start, end time.Time) bool {
+// windowsCached returns true when every date window between start and end already has a lake partition for the given source.
+func windowsCached(l *dataLake, source string, start, end time.Time) bool {
 	if l == nil {
 		return false
 	}
+	source = normalizeSourceID(source)
 	for _, win := range splitDateWindows(start, end, maxWindowDays) {
-		if l.shouldFetchWindow(win) {
+		if l.shouldFetchWindow(source, win) {
 			return false
 		}
 	}
@@ -235,6 +252,7 @@ func init() {
 	cacheCmd.Flags().String("keyword", "", "Keyword to scan (optional; empty primes cache/lake)")
 	cacheCmd.Flags().String("company", "", "Company filter (optional)")
 	cacheCmd.Flags().String("agency", "", "Agency filter (optional)")
+	cacheCmd.Flags().String("source", defaultSourceID, "Data source identifier (e.g., federal)")
 	cacheCmd.Flags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")
 	cacheCmd.Flags().Int("lookback-years", defaultLookbackYears, "Default window when start not specified")
 	cacheCmd.Flags().String("cache-dir", defaultCacheDir(), "Directory for parquet files and sqlite catalog")
@@ -326,8 +344,9 @@ func (m *cacheManager) close() {
 	}
 }
 
-func cacheKey(keyword, company, agency, dateType string) string {
-	return fmt.Sprintf("k=%s|c=%s|a=%s|d=%s", keyword, company, agency, dateType)
+func cacheKey(keyword, company, agency, dateType, source string) string {
+	normalizedSource := normalizeSourceID(source)
+	return fmt.Sprintf("s=%s|k=%s|c=%s|a=%s|d=%s", normalizedSource, keyword, company, agency, dateType)
 }
 
 func (m *cacheManager) loadCheckpoint(key string) (time.Time, error) {
@@ -363,13 +382,17 @@ func partitionKey(ts time.Time, agency string) string {
 	return filepath.Join(fy, fmt.Sprintf("agency=%s", ag))
 }
 
-// partitionKeyLake builds a richer partition including company for the lake layout.
-func partitionKeyLake(ts time.Time, agency, company string) string {
+// partitionKeyLake builds a richer partition including source and company for the lake layout.
+func partitionKeyLake(ts time.Time, source, agency, company string) string {
 	if ts.IsZero() {
 		ts = time.Now().UTC()
 	}
 	fy := financialYearLabel(ts)
 	month := monthLabel(ts)
+	src := sanitizePartitionComponent(normalizeSourceID(source))
+	if src == "" {
+		src = sanitizePartitionComponent(defaultSourceID)
+	}
 	ag := sanitizePartitionComponent(agency)
 	if ag == "" {
 		ag = "unknown_agency"
@@ -378,7 +401,7 @@ func partitionKeyLake(ts time.Time, agency, company string) string {
 	if co == "" {
 		co = "unknown_company"
 	}
-	return filepath.Join(fy, month, fmt.Sprintf("agency=%s", ag), fmt.Sprintf("company=%s", co))
+	return filepath.Join(fmt.Sprintf("source=%s", src), fy, month, fmt.Sprintf("agency=%s", ag), fmt.Sprintf("company=%s", co))
 }
 
 func monthLabel(ts time.Time) string {
@@ -408,11 +431,12 @@ func sanitizePartitionComponent(v string) string {
 	return v
 }
 
-func (m *cacheManager) newParquetSink(ts time.Time, agency, company string) (*lakeSink, error) {
-	return m.lake.newSink(ts, agency, company)
+func (m *cacheManager) newParquetSink(source string, ts time.Time, agency, company string) (*lakeSink, error) {
+	return m.lake.newSink(source, ts, agency, company)
 }
 
 func (m *cacheManager) queryCache(filters SearchRequest) (decimal.Decimal, bool, error) {
+	filters.Source = normalizeSourceID(filters.Source)
 	res, matched, err := m.lake.queryTotals(context.Background(), filters)
 	if err != nil {
 		return decimal.Zero, false, err
@@ -421,6 +445,15 @@ func (m *cacheManager) queryCache(filters SearchRequest) (decimal.Decimal, bool,
 }
 
 func rowMatches(row parquetRow, filters SearchRequest) bool {
+	if normalized := strings.TrimSpace(filters.Source); normalized != "" {
+		rowSource := row.Source
+		if rowSource == "" {
+			rowSource = defaultSourceID
+		}
+		if normalizeSourceID(normalized) != normalizeSourceID(rowSource) {
+			return false
+		}
+	}
 	if !filters.StartDate.IsZero() {
 		rowTime := time.Unix(0, row.ReleaseEpoch*int64(time.Millisecond)).UTC()
 		if rowTime.Before(filters.StartDate.UTC()) {
@@ -455,6 +488,7 @@ func rowMatches(row parquetRow, filters SearchRequest) bool {
 
 type parquetRow struct {
 	Partition     string  `parquet:"name=partition, type=BYTE_ARRAY, convertedtype=UTF8"`
+	Source        string  `parquet:"name=source, type=BYTE_ARRAY, convertedtype=UTF8"`
 	FinancialYear string  `parquet:"name=financial_year, type=BYTE_ARRAY, convertedtype=UTF8"`
 	AgencyKey     string  `parquet:"name=agency_key, type=BYTE_ARRAY, convertedtype=UTF8"`
 	CompanyKey    string  `parquet:"name=company_key, type=BYTE_ARRAY, convertedtype=UTF8"`

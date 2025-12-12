@@ -18,7 +18,7 @@ import (
 )
 
 // dataLake tracks parquet files in a partitioned layout plus a SQLite index
-// for fast discovery. Partitions are organized as fy=YYYY-YY/agency=<key>/company=<key>.
+// for fast discovery. Partitions are organized as source=<id>/fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>.
 type dataLake struct {
 	baseDir string
 	db      *sql.DB
@@ -32,22 +32,29 @@ func (l *dataLake) ensureSchema() error {
 	const schema = `
     CREATE TABLE IF NOT EXISTS parquet_files (
         path TEXT PRIMARY KEY,
+		source TEXT NOT NULL,
         fy TEXT NOT NULL,
         agency_key TEXT NOT NULL,
         company_key TEXT NOT NULL,
         row_count INTEGER NOT NULL,
         created_at TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_parquet_files_keys ON parquet_files(fy, agency_key, company_key);
+	CREATE INDEX IF NOT EXISTS idx_parquet_files_keys ON parquet_files(source, fy, agency_key, company_key);
     `
-	_, err := l.db.Exec(schema)
-	return err
+	if _, err := l.db.Exec(schema); err != nil {
+		return err
+	}
+	// Legacy catalogs might miss the source column; add it with a default when absent.
+	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN source TEXT NOT NULL DEFAULT 'federal'")
+	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_source ON parquet_files(source)")
+	return nil
 }
 
 type lakeSink struct {
 	w          *parquet.GenericWriter[parquetRow]
 	file       *os.File
 	lake       *dataLake
+	sourceKey  string
 	fy         string
 	agencyKey  string
 	companyKey string
@@ -64,15 +71,22 @@ func newLakeWriterPool(l *dataLake) *lakeWriterPool {
 	return &lakeWriterPool{lake: l, sinks: make(map[string]*lakeSink)}
 }
 
-func (l *dataLake) newSink(ts time.Time, agency, company string) (*lakeSink, error) {
+func (l *dataLake) newSink(source string, ts time.Time, agency, company string) (*lakeSink, error) {
 	fy := strings.TrimPrefix(financialYearLabel(ts), "fy=")
 	month := monthLabel(ts)
+	sourceKey := sanitizePartitionComponent(normalizeSourceID(source))
+	if sourceKey == "" {
+		sourceKey = sanitizePartitionComponent(defaultSourceID)
+	}
 	ag := sanitizePartitionComponent(agency)
+	if ag == "" {
+		ag = "unknown_agency"
+	}
 	co := sanitizePartitionComponent(company)
 	if co == "" {
 		co = "unknown_company"
 	}
-	dir := filepath.Join(l.baseDir, "lake", financialYearLabel(ts), month, fmt.Sprintf("agency=%s", ag), fmt.Sprintf("company=%s", co))
+	dir := filepath.Join(l.baseDir, "lake", fmt.Sprintf("source=%s", sourceKey), financialYearLabel(ts), month, fmt.Sprintf("agency=%s", ag), fmt.Sprintf("company=%s", co))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -82,12 +96,13 @@ func (l *dataLake) newSink(ts time.Time, agency, company string) (*lakeSink, err
 		return nil, err
 	}
 	w := parquet.NewGenericWriter[parquetRow](f, parquet.Compression(&snappy.Codec{}))
-	return &lakeSink{w: w, file: f, lake: l, fy: fy, agencyKey: ag, companyKey: co}, nil
+	return &lakeSink{w: w, file: f, lake: l, sourceKey: sourceKey, fy: fy, agencyKey: ag, companyKey: co}, nil
 }
 
 func (s *lakeSink) write(ms MatchSummary) {
 	row := parquetRow{
-		Partition:     partitionKeyLake(ms.ReleaseDate, ms.Agency, ms.Supplier),
+		Partition:     partitionKeyLake(ms.ReleaseDate, ms.Source, ms.Agency, ms.Supplier),
+		Source:        normalizeSourceID(ms.Source),
 		FinancialYear: strings.TrimPrefix(financialYearLabel(ms.ReleaseDate), "fy="),
 		AgencyKey:     sanitizePartitionComponent(ms.Agency),
 		CompanyKey:    sanitizePartitionComponent(ms.Supplier),
@@ -113,7 +128,7 @@ func (s *lakeSink) close() {
 		_ = s.file.Close()
 	}
 	if s.lake != nil && s.rows > 0 {
-		_, _ = s.lake.db.Exec("INSERT OR REPLACE INTO parquet_files(path, fy, agency_key, company_key, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?)", s.file.Name(), s.fy, s.agencyKey, s.companyKey, s.rows, time.Now().UTC().Format(time.RFC3339))
+		_, _ = s.lake.db.Exec("INSERT OR REPLACE INTO parquet_files(path, source, fy, agency_key, company_key, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)", s.file.Name(), s.sourceKey, s.fy, s.agencyKey, s.companyKey, s.rows, time.Now().UTC().Format(time.RFC3339))
 	}
 }
 
@@ -122,11 +137,11 @@ func (p *lakeWriterPool) write(ms MatchSummary) error {
 	if p == nil || p.lake == nil {
 		return fmt.Errorf("lake writer pool not initialized")
 	}
-	partition := partitionKeyLake(ms.ReleaseDate, ms.Agency, ms.Supplier)
+	partition := partitionKeyLake(ms.ReleaseDate, ms.Source, ms.Agency, ms.Supplier)
 	sink, ok := p.sinks[partition]
 	if !ok {
 		var err error
-		sink, err = p.lake.newSink(ms.ReleaseDate, ms.Agency, ms.Supplier)
+		sink, err = p.lake.newSink(ms.Source, ms.ReleaseDate, ms.Agency, ms.Supplier)
 		if err != nil {
 			return err
 		}
@@ -156,12 +171,12 @@ func (l *dataLake) rebuildIndex(ctx context.Context) error {
 		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".parquet") {
 			return nil
 		}
-		fy, ag, co := parseLakePartition(path)
+		src, fy, ag, co := parseLakePartition(path)
 		rowCount, countErr := countRows(path)
 		if countErr != nil {
 			return nil
 		}
-		_, _ = l.db.ExecContext(ctx, "INSERT OR REPLACE INTO parquet_files(path, fy, agency_key, company_key, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?)", path, fy, ag, co, rowCount, time.Now().UTC().Format(time.RFC3339))
+		_, _ = l.db.ExecContext(ctx, "INSERT OR REPLACE INTO parquet_files(path, source, fy, agency_key, company_key, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)", path, src, fy, ag, co, rowCount, time.Now().UTC().Format(time.RFC3339))
 		return nil
 	})
 }
@@ -171,6 +186,9 @@ func (l *dataLake) queryTotals(ctx context.Context, filters SearchRequest) (deci
 	// Collect candidate files via index filtering.
 	var args []any
 	var clauses []string
+	sourceKey := sanitizePartitionComponent(normalizeSourceID(filters.Source))
+	clauses = append(clauses, "source = ?")
+	args = append(args, sourceKey)
 	if strings.TrimSpace(filters.Agency) != "" {
 		agencyKey := sanitizePartitionComponent(filters.Agency)
 		clauses = append(clauses, "agency_key LIKE ?")
@@ -269,8 +287,9 @@ func sumParquetFile(path string, filters SearchRequest) (decimal.Decimal, bool, 
 }
 
 // hasMonthPartition returns true if a month partition already contains parquet files.
-func (l *dataLake) hasMonthPartition(ts time.Time) bool {
-	root := filepath.Join(l.baseDir, "lake", financialYearLabel(ts), monthLabel(ts))
+func (l *dataLake) hasMonthPartition(source string, ts time.Time) bool {
+	sourceKey := sanitizePartitionComponent(normalizeSourceID(source))
+	root := filepath.Join(l.baseDir, "lake", fmt.Sprintf("source=%s", sourceKey), financialYearLabel(ts), monthLabel(ts))
 	found := false
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -289,8 +308,8 @@ func (l *dataLake) hasMonthPartition(ts time.Time) bool {
 }
 
 // shouldFetchWindow reports whether a date window should be fetched based on existing partitions.
-func (l *dataLake) shouldFetchWindow(win dateWindow) bool {
-	return !l.hasMonthPartition(win.start)
+func (l *dataLake) shouldFetchWindow(source string, win dateWindow) bool {
+	return !l.hasMonthPartition(source, win.start)
 }
 
 // countRows returns the number of rows in a parquet file without materializing records.
@@ -336,11 +355,14 @@ func countRows(path string) (int64, error) {
 	return rows, nil
 }
 
-// parseLakePartition extracts fy, agency, and company keys from a lake file path.
-func parseLakePartition(path string) (string, string, string) {
+// parseLakePartition extracts source, fy, agency, and company keys from a lake file path.
+func parseLakePartition(path string) (string, string, string, string) {
 	parts := strings.Split(filepath.ToSlash(path), "/")
-	var fy, ag, co string
+	var src, fy, ag, co string
 	for _, p := range parts {
+		if strings.HasPrefix(p, "source=") {
+			src = strings.TrimPrefix(p, "source=")
+		}
 		if strings.HasPrefix(p, "fy=") {
 			fy = strings.TrimPrefix(p, "fy=")
 		}
@@ -351,5 +373,8 @@ func parseLakePartition(path string) (string, string, string) {
 			co = strings.TrimPrefix(p, "company=")
 		}
 	}
-	return fy, ag, co
+	if src == "" {
+		src = sanitizePartitionComponent(defaultSourceID)
+	}
+	return src, fy, ag, co
 }

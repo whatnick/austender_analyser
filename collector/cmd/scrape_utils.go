@@ -38,6 +38,7 @@ type SearchRequest struct {
 	Keyword           string
 	Company           string
 	Agency            string
+	Source            string
 	StartDate         time.Time
 	EndDate           time.Time
 	DateType          string
@@ -59,6 +60,7 @@ type MatchSummary struct {
 	ContractID  string
 	ReleaseID   string
 	OCID        string
+	Source      string
 	Supplier    string
 	Agency      string
 	Title       string
@@ -128,8 +130,10 @@ type contractAggregator struct {
 }
 
 func newContractAggregator(req SearchRequest, sink MatchHandler) *contractAggregator {
+	normalized := req
+	normalized.Source = normalizeSourceID(req.Source)
 	return &contractAggregator{
-		filters:    req,
+		filters:    normalized,
 		aggregates: make(map[string]contractAggregate),
 		sink:       sink,
 	}
@@ -149,6 +153,7 @@ func (a *contractAggregator) process(rel ocdsRelease) {
 	}
 	releaseTime := parseReleaseTime(rel.Date)
 	summary := MatchSummary{
+		Source:      normalizeSourceID(a.filters.Source),
 		ContractID:  contractID,
 		ReleaseID:   rel.ID,
 		OCID:        rel.OCID,
@@ -194,11 +199,39 @@ type ocdsClient struct {
 	maxConcurrent int
 }
 
-// RunSearch queries the OCDS API and returns the formatted contract sum.
+// RunSearch dispatches to the requested source, defaulting to the federal OCDS API.
 func RunSearch(ctx context.Context, req SearchRequest) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	req.Source = normalizeSourceID(req.Source)
+	src, err := resolveSource(req.Source)
+	if err != nil {
+		return "", err
+	}
+	req.Source = src.ID()
+	return src.Run(ctx, req)
+}
+
+// init ensures the default federal source is always registered.
+func init() {
+	registerSource(newFederalSource())
+	registerSource(newPlaceholderSource("vic"))
+}
+
+type federalSource struct{}
+
+func newFederalSource() Source {
+	return federalSource{}
+}
+
+func (f federalSource) ID() string { return defaultSourceID }
+
+func (f federalSource) Run(ctx context.Context, req SearchRequest) (string, error) {
+	return runFederalSearch(ctx, req)
+}
+
+func runFederalSearch(ctx context.Context, req SearchRequest) (string, error) {
 	timeout := resolveTimeout()
 	cancel := func() {}
 	if timeout > 0 {
@@ -221,6 +254,7 @@ func RunSearch(ctx context.Context, req SearchRequest) (string, error) {
 		maxConcurrent: defaultMaxConcurrency,
 	}
 
+	req.Source = normalizeSourceID(req.Source)
 	agg := newContractAggregator(req, req.OnAnyMatch)
 	if err := client.fetchAll(ctx, start, end, agg.process, req.OnProgress, req.ShouldFetchWindow); err != nil {
 		return "", err
@@ -567,7 +601,7 @@ func parseDateInput(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid date %q", raw)
 }
 
-func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time, dateType string, lookbackYears int, verbose bool) {
+func scrapeAncap(keywordVal, companyName, agencyVal, sourceVal string, start, end time.Time, dateType string, lookbackYears int, verbose bool) {
 	var onMatch MatchHandler
 	if verbose {
 		onMatch = func(summary MatchSummary) {
@@ -600,6 +634,7 @@ func scrapeAncap(keywordVal, companyName, agencyVal string, start, end time.Time
 		Keyword:       keywordVal,
 		Company:       companyName,
 		Agency:        agencyVal,
+		Source:        sourceVal,
 		StartDate:     start,
 		EndDate:       end,
 		DateType:      dateType,

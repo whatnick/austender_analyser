@@ -49,10 +49,11 @@ func TestWindowsCached(t *testing.T) {
 
 	start := now.AddDate(-1, 0, 0)
 	end := now.AddDate(0, 1, 0)
-	require.False(t, mgr.lake.shouldFetchWindow(dateWindow{start: now, end: now.AddDate(0, 0, maxWindowDays)}))
+	require.False(t, mgr.lake.shouldFetchWindow(defaultSourceID, dateWindow{start: now, end: now.AddDate(0, 0, maxWindowDays)}))
 	// windowsCached expects full coverage of every window; ensure we query only the month we wrote.
-	require.True(t, windowsCached(mgr.lake, now, now))
-	require.False(t, windowsCached(mgr.lake, start, end))
+	require.True(t, windowsCached(mgr.lake, defaultSourceID, now, now))
+	require.False(t, windowsCached(mgr.lake, "vic", now, now))
+	require.False(t, windowsCached(mgr.lake, defaultSourceID, start, end))
 }
 
 func parseDecimal(t *testing.T, v string) decimal.Decimal {

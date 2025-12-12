@@ -19,8 +19,11 @@ var rootCmd = &cobra.Command{
 		startRaw, _ := cmd.Flags().GetString("start-date")
 		endRaw, _ := cmd.Flags().GetString("end-date")
 		dateType, _ := cmd.Flags().GetString("date-type")
+		sourceVal, _ := cmd.Flags().GetString("source")
 		lookbackYears, _ := cmd.Flags().GetInt("lookback-years")
 		verbose, _ := cmd.Flags().GetBool("verbose")
+
+		sourceVal = normalizeSourceID(sourceVal)
 
 		start, err := parseDateFlag(startRaw)
 		if err != nil {
@@ -37,7 +40,7 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
-		scrapeAncap(keywordVal, companyName, agencyVal, start, end, dateType, lookbackYears, verbose)
+		scrapeAncap(keywordVal, companyName, agencyVal, sourceVal, start, end, dateType, lookbackYears, verbose)
 	},
 }
 
@@ -52,6 +55,7 @@ func init() {
 	rootCmd.PersistentFlags().String("c", "", "Company to scan")
 	rootCmd.PersistentFlags().String("d", "", "Department/agency to scan")
 	rootCmd.PersistentFlags().String("k", "", "Keywords to scan")
+	rootCmd.PersistentFlags().String("source", defaultSourceID, "Data source identifier (e.g., federal)")
 	rootCmd.PersistentFlags().String("start-date", "", "Optional start date (YYYY-MM-DD or RFC3339)")
 	rootCmd.PersistentFlags().String("end-date", "", "Optional end date (YYYY-MM-DD or RFC3339)")
 	rootCmd.PersistentFlags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")

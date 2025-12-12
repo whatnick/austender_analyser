@@ -9,6 +9,7 @@ import (
 
 func TestRowMatchesFilters(t *testing.T) {
 	row := parquetRow{
+		Source:       defaultSourceID,
 		Supplier:     "Acme Pty Ltd",
 		Agency:       "ATO",
 		Title:        "Audit and advisory",
@@ -28,6 +29,8 @@ func TestRowMatchesFilters(t *testing.T) {
 		{"company miss", SearchRequest{Company: "other"}, false},
 		{"agency hit", SearchRequest{Agency: "ato"}, true},
 		{"agency miss", SearchRequest{Agency: "dva"}, false},
+		{"source match", SearchRequest{Source: defaultSourceID}, true},
+		{"source miss", SearchRequest{Source: "vic"}, false},
 		{"before start", SearchRequest{StartDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)}, false},
 		{"after end", SearchRequest{EndDate: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)}, false},
 	}
@@ -42,10 +45,11 @@ func TestRowMatchesFilters(t *testing.T) {
 func TestPartitionHelpers(t *testing.T) {
 	base := time.Date(2024, time.July, 10, 0, 0, 0, 0, time.UTC)
 	require.Contains(t, partitionKey(base, "ATO"), "fy=2024-25")
-	path := partitionKeyLake(base, "ATO", "ACME & Co")
+	path := partitionKeyLake(base, defaultSourceID, "ATO", "ACME & Co")
+	require.Contains(t, path, "source=federal")
 	require.Contains(t, path, "fy=2024-25")
 	require.Contains(t, path, "agency=ato")
-	require.Contains(t, path, "company=acme_co")
+	require.Contains(t, path, "company=acme__co")
 	require.Equal(t, "month=2024-07", monthLabel(base))
 }
 
@@ -53,11 +57,17 @@ func TestResolveTimeoutAndRetry(t *testing.T) {
 	t.Setenv("AUSTENDER_REQUEST_TIMEOUT", "150ms")
 	require.Equal(t, 150*time.Millisecond, resolveTimeout())
 	t.Setenv("AUSTENDER_REQUEST_TIMEOUT", "bad")
-	require.Equal(t, defaultRequestTimeout, resolveTimeout())
+	require.Equal(t, time.Duration(defaultRequestTimeout), resolveTimeout())
 
 	require.True(t, shouldRetryStatus(500))
 	require.True(t, shouldRetryStatus(429))
 	require.False(t, shouldRetryStatus(404))
+}
+
+func TestCacheKeyIncludesSource(t *testing.T) {
+	base := cacheKey("k", "c", "a", "d", defaultSourceID)
+	alt := cacheKey("k", "c", "a", "d", "vic")
+	require.NotEqual(t, base, alt)
 }
 
 func TestSplitDateWindows(t *testing.T) {
