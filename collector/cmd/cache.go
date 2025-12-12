@@ -421,6 +421,19 @@ func (m *cacheManager) queryCache(filters SearchRequest) (decimal.Decimal, bool,
 }
 
 func rowMatches(row parquetRow, filters SearchRequest) bool {
+	if !filters.StartDate.IsZero() {
+		rowTime := time.Unix(0, row.ReleaseEpoch*int64(time.Millisecond)).UTC()
+		if rowTime.Before(filters.StartDate.UTC()) {
+			return false
+		}
+	}
+	if !filters.EndDate.IsZero() {
+		rowTime := time.Unix(0, row.ReleaseEpoch*int64(time.Millisecond)).UTC()
+		if rowTime.After(filters.EndDate.UTC()) {
+			return false
+		}
+	}
+
 	kw := strings.ToLower(filters.Keyword)
 	comp := strings.ToLower(filters.Company)
 	agency := strings.ToLower(filters.Agency)

@@ -65,14 +65,14 @@ func newLakeWriterPool(l *dataLake) *lakeWriterPool {
 }
 
 func (l *dataLake) newSink(ts time.Time, agency, company string) (*lakeSink, error) {
-	fy := financialYearLabel(ts)
+	fy := strings.TrimPrefix(financialYearLabel(ts), "fy=")
 	month := monthLabel(ts)
 	ag := sanitizePartitionComponent(agency)
 	co := sanitizePartitionComponent(company)
 	if co == "" {
 		co = "unknown_company"
 	}
-	dir := filepath.Join(l.baseDir, "lake", fy, month, fmt.Sprintf("agency=%s", ag), fmt.Sprintf("company=%s", co))
+	dir := filepath.Join(l.baseDir, "lake", financialYearLabel(ts), month, fmt.Sprintf("agency=%s", ag), fmt.Sprintf("company=%s", co))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (l *dataLake) newSink(ts time.Time, agency, company string) (*lakeSink, err
 func (s *lakeSink) write(ms MatchSummary) {
 	row := parquetRow{
 		Partition:     partitionKeyLake(ms.ReleaseDate, ms.Agency, ms.Supplier),
-		FinancialYear: financialYearLabel(ms.ReleaseDate),
+		FinancialYear: strings.TrimPrefix(financialYearLabel(ms.ReleaseDate), "fy="),
 		AgencyKey:     sanitizePartitionComponent(ms.Agency),
 		CompanyKey:    sanitizePartitionComponent(ms.Supplier),
 		ContractID:    ms.ContractID,
