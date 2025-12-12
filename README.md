@@ -1,3 +1,4 @@
+[![codecov](https://codecov.io/gh/whatnick/austender_analyser/graph/badge.svg?token=YTBIHEQAZL)](https://codecov.io/gh/whatnick/austender_analyser)
 # Austender Summarizer
 There is always news around how much the government spends on contracting. However it is hard
 to find a quick summary of figures in a transparent manner without digging through Austender
