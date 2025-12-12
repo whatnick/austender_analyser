@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,10 +17,9 @@ func TestResolveSourceUnknown(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestPlaceholderSource(t *testing.T) {
+func TestVicSourceRegistered(t *testing.T) {
 	src, err := resolveSource("vic")
 	require.NoError(t, err)
-
-	_, runErr := src.Run(context.Background(), SearchRequest{Source: "vic"})
-	require.Error(t, runErr)
+	require.Equal(t, "vic", src.ID())
+	// Do not invoke Run in unit tests to avoid hitting the live site.
 }

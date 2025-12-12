@@ -53,6 +53,27 @@ func normalizeSourceID(id string) string {
 	return cleaned
 }
 
+// ensureSourcesRegistered guards against init-order surprises and makes sure all known
+// sources are present before we render help or resolve a source at runtime.
+func ensureSourcesRegistered() {
+	registerSource(newFederalSource())
+	registerSource(newVicSource())
+}
+
+func availableSources() []string {
+	ensureSourcesRegistered()
+	var keys []string
+	for key := range sourceRegistry {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func init() {
+	ensureSourcesRegistered()
+}
+
 type placeholderSource struct {
 	id string
 }

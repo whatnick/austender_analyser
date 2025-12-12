@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -52,10 +53,12 @@ func Execute() {
 }
 
 func init() {
+	ensureSourcesRegistered()
+	sourceHelp := fmt.Sprintf("Data source identifier (%s)", strings.Join(availableSources(), ", "))
 	rootCmd.PersistentFlags().String("c", "", "Company to scan")
 	rootCmd.PersistentFlags().String("d", "", "Department/agency to scan")
 	rootCmd.PersistentFlags().String("k", "", "Keywords to scan")
-	rootCmd.PersistentFlags().String("source", defaultSourceID, "Data source identifier (e.g., federal)")
+	rootCmd.PersistentFlags().String("source", defaultSourceID, sourceHelp)
 	rootCmd.PersistentFlags().String("start-date", "", "Optional start date (YYYY-MM-DD or RFC3339)")
 	rootCmd.PersistentFlags().String("end-date", "", "Optional end date (YYYY-MM-DD or RFC3339)")
 	rootCmd.PersistentFlags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")

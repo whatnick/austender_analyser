@@ -204,6 +204,7 @@ func RunSearch(ctx context.Context, req SearchRequest) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ensureSourcesRegistered()
 	req.Source = normalizeSourceID(req.Source)
 	src, err := resolveSource(req.Source)
 	if err != nil {
@@ -211,12 +212,6 @@ func RunSearch(ctx context.Context, req SearchRequest) (string, error) {
 	}
 	req.Source = src.ID()
 	return src.Run(ctx, req)
-}
-
-// init ensures the default federal source is always registered.
-func init() {
-	registerSource(newFederalSource())
-	registerSource(newPlaceholderSource("vic"))
 }
 
 type federalSource struct{}
