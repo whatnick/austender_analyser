@@ -59,6 +59,7 @@ func ensureSourcesRegistered() {
 	registerSource(newFederalSource())
 	registerSource(newVicSource())
 	registerSource(newNswSource())
+	registerSource(newSaSource())
 }
 
 func availableSources() []string {
