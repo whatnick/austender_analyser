@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -43,15 +44,111 @@ func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	lookbackYears := resolveLookbackYears(req.LookbackYears)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackYears)
 
-	windows := []dateWindow{{start: startResolved, end: endResolved}}
-	if req.ShouldFetchWindow != nil {
-		windows = splitDateWindows(startResolved, endResolved, maxWindowDays)
-	}
+	// Always use monthly windows for NSW so lookbacks can run in parallel.
+	windows := splitDateWindows(startResolved, endResolved, maxWindowDays)
 
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("NSW_USE_BROWSER")), "true") {
 		return runNswWithBrowser(ctx, req, windows)
 	}
 
+	res, err := runNswWithCollyParallel(ctx, req, windows)
+	if err != nil {
+		if errors.Is(err, errNswWAF) {
+			return runNswWithBrowser(ctx, req, windows)
+		}
+		return "", err
+	}
+	return res, nil
+}
+
+func runNswWithCollyParallel(ctx context.Context, req SearchRequest, windows []dateWindow) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(windows) == 0 {
+		return formatMoneyDecimal(decimal.Zero), nil
+	}
+
+	maxConc := defaultMaxConcurrency
+	if maxConc < 1 {
+		maxConc = 1
+	}
+	if maxConc > len(windows) {
+		maxConc = len(windows)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, maxConc)
+	var wg sync.WaitGroup
+	var firstErr error
+	var firstErrMu sync.Mutex
+
+	var completed int32
+	totalWindows := len(windows)
+	notifyProgress := func() {
+		if req.OnProgress != nil {
+			req.OnProgress(int(atomic.LoadInt32(&completed)), totalWindows)
+		}
+	}
+
+	shared := &nswSharedAgg{
+		req:  req,
+		seen: make(map[string]struct{}),
+	}
+
+	for _, win := range windows {
+		win := win
+		if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+			atomic.AddInt32(&completed, 1)
+			notifyProgress()
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			if err := runNswCollyWindow(ctx, req, win, shared); err != nil {
+				firstErrMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				firstErrMu.Unlock()
+				if errors.Is(err, errNswWAF) {
+					cancel()
+				}
+			}
+			atomic.AddInt32(&completed, 1)
+			notifyProgress()
+		}()
+	}
+
+	wg.Wait()
+	if firstErr != nil {
+		return "", firstErr
+	}
+
+	shared.mu.Lock()
+	defer shared.mu.Unlock()
+	return formatMoneyDecimal(shared.total), nil
+}
+
+type nswSharedAgg struct {
+	req   SearchRequest
+	mu    sync.Mutex
+	cbMu  sync.Mutex
+	total decimal.Decimal
+	seen  map[string]struct{}
+}
+
+func runNswCollyWindow(ctx context.Context, req SearchRequest, win dateWindow, shared *nswSharedAgg) error {
 	collector := colly.NewCollector(
 		colly.AllowedDomains("buy.nsw.gov.au"),
 		colly.AllowURLRevisit(),
@@ -80,8 +177,6 @@ func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		if r == nil {
 			return
 		}
-		// buy.nsw.gov.au intermittently serves an AWS WAF JS challenge (202 Accepted)
-		// which Colly can't solve. Detect it early and fall back to browser automation.
 		if r.StatusCode == http.StatusAccepted || r.StatusCode == http.StatusForbidden {
 			if isNswWafChallenge(r.Body) {
 				scrapeErr = errNswWAF
@@ -93,10 +188,6 @@ func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 			r.Request.Abort()
 		}
 	})
-
-	total := decimal.Zero
-	seen := make(map[string]struct{})
-	var mu sync.Mutex
 
 	collector.OnHTML("ul.cards.profiles > li", func(e *colly.HTMLElement) {
 		if ctx.Err() != nil {
@@ -133,15 +224,17 @@ func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		if contractID == "" {
 			contractID = title
 		}
-
-		// De-dupe (pagination sometimes repeats).
-		mu.Lock()
-		if _, ok := seen[contractID]; ok {
-			mu.Unlock()
+		if contractID == "" {
 			return
 		}
-		seen[contractID] = struct{}{}
-		mu.Unlock()
+
+		shared.mu.Lock()
+		if _, ok := shared.seen[contractID]; ok {
+			shared.mu.Unlock()
+			return
+		}
+		shared.seen[contractID] = struct{}{}
+		shared.mu.Unlock()
 
 		summary := MatchSummary{
 			Source:      nswSourceID,
@@ -155,28 +248,31 @@ func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 			ReleaseDate: publishDate,
 		}
 
+		// Callbacks may not be thread-safe.
+		shared.cbMu.Lock()
 		if req.OnAnyMatch != nil {
 			req.OnAnyMatch(summary)
 		}
+		shared.cbMu.Unlock()
 
-		// Reuse shared summary filtering logic.
 		if !matchesSummaryFilters(req, summary, periodEnd) {
 			return
 		}
 		if !req.StartDate.IsZero() && !periodStart.IsZero() && periodStart.Before(req.StartDate) {
-			// Optional: treat contract period start as an additional date signal.
-			// (keep this conservative: only apply when periodStart is present)
+			// keep conservative
 		}
 
+		shared.cbMu.Lock()
 		if req.OnMatch != nil {
 			req.OnMatch(summary)
 		}
-		mu.Lock()
-		total = total.Add(summary.Amount)
-		mu.Unlock()
+		shared.cbMu.Unlock()
+
+		shared.mu.Lock()
+		shared.total = shared.total.Add(summary.Amount)
+		shared.mu.Unlock()
 	})
 
-	// Follow next page links.
 	collector.OnHTML(".nsw-pagination__item--next-page a.nsw-direction-link.choose-page", func(e *colly.HTMLElement) {
 		href := strings.TrimSpace(e.Attr("href"))
 		if href == "" {
@@ -186,36 +282,15 @@ func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		_ = e.Request.Visit(nextURL)
 	})
 
-	completed := 0
-	for _, win := range windows {
-		if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
-			completed++
-			if req.OnProgress != nil {
-				req.OnProgress(completed, len(windows))
-			}
-			continue
-		}
-		startURL := buildNswSearchURL(req, 1, win.start, win.end)
-		if err := collector.Visit(startURL); err != nil {
-			return "", err
-		}
-		collector.Wait()
-		if scrapeErr != nil {
-			if errors.Is(scrapeErr, errNswWAF) {
-				return runNswWithBrowser(ctx, req, windows)
-			}
-			return "", scrapeErr
-		}
-		completed++
-		if req.OnProgress != nil {
-			req.OnProgress(completed, len(windows))
-		}
+	startURL := buildNswSearchURL(req, 1, win.start, win.end)
+	if err := collector.Visit(startURL); err != nil {
+		return err
 	}
-
-	mu.Lock()
-	out := formatMoneyDecimal(total)
-	mu.Unlock()
-	return out, nil
+	collector.Wait()
+	if scrapeErr != nil {
+		return scrapeErr
+	}
+	return nil
 }
 
 func isNswWafChallenge(body []byte) bool {
