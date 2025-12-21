@@ -43,7 +43,7 @@ func TestBuildVicSearchURL(t *testing.T) {
 	req := SearchRequest{Keyword: "Splunk", Company: "Splunk", Agency: "Justice"}
 	url := buildVicSearchURL(req)
 	require.Contains(t, url, "keywords=Splunk")
-	require.Contains(t, url, "supplierName=Splunk")
+	require.Contains(t, url, "supplierName=")
 	require.Contains(t, url, "orderBy=startDate")
 	require.Contains(t, url, "browse=false")
 	require.Contains(t, url, "page=")

@@ -289,13 +289,19 @@ func formatMoneyDecimal(v decimal.Decimal) string {
 }
 
 func parseMoneyToDecimal(v string) (decimal.Decimal, error) {
-	clean := strings.ReplaceAll(v, "$", "")
+	clean := strings.TrimSpace(v)
 	clean = strings.ReplaceAll(clean, ",", "")
-	clean = strings.TrimSpace(clean)
 	if clean == "" {
 		return decimal.Zero, nil
 	}
-	return decimal.NewFromString(clean)
+
+	// Be lenient: values may include currency prefixes like "A$", "AUD", NBSPs, etc.
+	// Extract the first numeric token and parse that.
+	num := regexp.MustCompile(`-?\d+(?:\.\d+)?`).FindString(clean)
+	if num == "" {
+		return decimal.Zero, fmt.Errorf("no numeric value in %q", v)
+	}
+	return decimal.NewFromString(num)
 }
 
 func newCacheManager(baseDir string) (*cacheManager, error) {

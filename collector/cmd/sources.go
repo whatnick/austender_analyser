@@ -58,6 +58,7 @@ func normalizeSourceID(id string) string {
 func ensureSourcesRegistered() {
 	registerSource(newFederalSource())
 	registerSource(newVicSource())
+	registerSource(newNswSource())
 }
 
 func availableSources() []string {

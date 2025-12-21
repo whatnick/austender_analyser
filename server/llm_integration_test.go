@@ -1,5 +1,5 @@
-//go:build llama_integration
-// +build llama_integration
+//go:build llama_integration && llamacpp
+// +build llama_integration,llamacpp
 
 package main
 

@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -19,6 +21,8 @@ import (
 
 const vicSourceID = "vic"
 const vicSearchURL = "https://www.tenders.vic.gov.au/contract/search"
+
+var errVicForbidden = errors.New("vic scrape forbidden")
 
 // Chrome-like UA to reduce blocks.
 const vicUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -55,77 +59,110 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 		r.Headers.Set("Accept-Language", "en")
 		r.Headers.Set("Referer", vicSearchURL)
+		r.Headers.Set("Upgrade-Insecure-Requests", "1")
 	})
 
 	var scrapeErr error
 	total := decimal.Zero
+	observedRows := 0
+	var totalsMu sync.Mutex
 
 	collector.OnError(func(_ *colly.Response, err error) {
 		scrapeErr = err
 	})
 
-	collector.OnHTML("table tbody tr", func(e *colly.HTMLElement) {
-		cells := e.ChildTexts("td")
-		if len(cells) < 6 {
+	collector.OnResponse(func(r *colly.Response) {
+		// Buying for Victoria intermittently blocks non-browser clients.
+		// Treat 403 as a signal to fall back to the headless browser flow.
+		if r != nil && r.StatusCode == http.StatusForbidden {
+			scrapeErr = errVicForbidden
+			r.Request.Abort()
+		}
+	})
+
+	collector.OnHTML("table", func(e *colly.HTMLElement) {
+		if !isVicResultsTable(e.DOM) {
 			return
 		}
+		e.DOM.Find("tbody tr").Each(func(_ int, row *goquery.Selection) {
+			totalsMu.Lock()
+			observedRows++
+			totalsMu.Unlock()
+			cells := row.Find("td")
+			if cells.Length() < 6 {
+				return
+			}
+			getText := func(idx int) string {
+				return strings.TrimSpace(cells.Eq(idx).Text())
+			}
+			contractID := getText(0)
+			if !isLikelyVicContractID(contractID) {
+				return
+			}
+			title := getText(1)
+			status := getText(2)
+			startDate := parseVicDate(getText(3))
+			if startDate.IsZero() {
+				return
+			}
+			endDate := parseVicDate(getText(4))
+			amount := parseVicAmount(getText(5))
 
-		contractID := strings.TrimSpace(cells[0])
-		title := strings.TrimSpace(cells[1])
-		status := strings.TrimSpace(cells[2])
-		startDate := parseVicDate(cells[3])
-		endDate := parseVicDate(cells[4])
-		amount := parseVicAmount(cells[5])
+			agency := ""
+			supplier := ""
+			if cells.Length() > 6 {
+				agency = getText(6)
+			}
+			if cells.Length() > 7 {
+				supplier = getText(7)
+			}
 
-		agency := ""
-		supplier := ""
-		if len(cells) > 6 {
-			agency = strings.TrimSpace(cells[6])
-		}
-		if len(cells) > 7 {
-			supplier = strings.TrimSpace(cells[7])
-		}
-
-		detailLink := strings.TrimSpace(e.ChildAttr("a", "href"))
-		if detailLink != "" {
-			detailLink = e.Request.AbsoluteURL(detailLink)
-		}
-		if (agency == "" || supplier == "") && detailLink != "" && ctx.Err() == nil {
-			detailAgency, detailSupplier, detailErr := fetchVicDetail(ctx, detailLink)
-			if detailErr == nil {
-				if agency == "" {
-					agency = detailAgency
-				}
-				if supplier == "" {
-					supplier = detailSupplier
+			detailLink := ""
+			if href, ok := row.Find("a").First().Attr("href"); ok {
+				detailLink = strings.TrimSpace(href)
+			}
+			if detailLink != "" {
+				detailLink = e.Request.AbsoluteURL(detailLink)
+			}
+			if (agency == "" || supplier == "") && detailLink != "" && ctx.Err() == nil {
+				detailAgency, detailSupplier, detailErr := fetchVicDetail(ctx, detailLink)
+				if detailErr == nil {
+					if agency == "" {
+						agency = detailAgency
+					}
+					if supplier == "" {
+						supplier = detailSupplier
+					}
 				}
 			}
-		}
 
-		summary := MatchSummary{
-			Source:      vicSourceID,
-			ContractID:  contractID,
-			ReleaseID:   contractID,
-			OCID:        contractID,
-			Supplier:    supplier,
-			Agency:      agency,
-			Title:       buildVicTitle(title, status),
-			Amount:      amount,
-			ReleaseDate: startDate,
-		}
+			summary := MatchSummary{
+				Source:      vicSourceID,
+				ContractID:  contractID,
+				ReleaseID:   contractID,
+				OCID:        contractID,
+				Supplier:    supplier,
+				Agency:      agency,
+				Title:       buildVicTitle(title, status),
+				Amount:      amount,
+				ReleaseDate: startDate,
+			}
 
-		if req.OnAnyMatch != nil {
-			req.OnAnyMatch(summary)
-		}
+			if req.OnAnyMatch != nil {
+				req.OnAnyMatch(summary)
+			}
 
-		if !matchesSummaryFilters(req, summary, endDate) {
-			return
-		}
+			if !matchesSummaryFilters(req, summary, endDate) {
+				return
+			}
 
-		if req.OnMatch != nil {
-			req.OnMatch(summary)
-		}
-		total = total.Add(summary.Amount)
+			if req.OnMatch != nil {
+				req.OnMatch(summary)
+			}
+			totalsMu.Lock()
+			total = total.Add(summary.Amount)
+			totalsMu.Unlock()
+		})
 	})
 
 	collector.OnHTML("a[aria-label='Next']:not(.disabled)", func(e *colly.HTMLElement) {
@@ -145,11 +182,27 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	})
 
 	if err := collector.Visit(target); err != nil {
+		// Some blocks surface as a Visit error.
+		if errors.Is(err, errVicForbidden) || strings.Contains(strings.ToLower(err.Error()), "forbidden") {
+			return runVicWithBrowser(ctx, target, req)
+		}
 		return "", err
 	}
 	collector.Wait()
 	if scrapeErr != nil {
+		if errors.Is(scrapeErr, errVicForbidden) || strings.Contains(strings.ToLower(scrapeErr.Error()), "forbidden") {
+			return runVicWithBrowser(ctx, target, req)
+		}
 		return "", scrapeErr
+	}
+
+	// The VIC search page is frequently rendered client-side. In those cases Colly sees an empty
+	// table despite a 200 response. If we didn't observe any result rows, retry with headless Chrome.
+	totalsMu.Lock()
+	rows := observedRows
+	totalsMu.Unlock()
+	if rows == 0 && ctx.Err() == nil {
+		return runVicWithBrowser(ctx, target, req)
 	}
 
 	return formatMoneyDecimal(total), nil
@@ -165,7 +218,7 @@ func buildVicSearchURL(req SearchRequest) string {
 	params.Set("title", "")
 	params.Set("code", "")
 	params.Set("buyerId", "")
-	params.Set("supplierName", strings.TrimSpace(req.Company))
+	params.Set("supplierName", "")
 	params.Set("minCost", "")
 	params.Set("expiryDateFrom", "")
 	params.Set("expiryDateTo", "")
@@ -222,67 +275,196 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 	defer cancelCtx()
 	defer cancel()
 
-	var tableHTML string
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(target),
 		chromedp.WaitVisible(`table`, chromedp.ByQuery),
-		chromedp.OuterHTML(`table`, &tableHTML, chromedp.ByQuery),
 	); err != nil {
 		return "", err
 	}
 
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(tableHTML))
-	if err != nil {
+	// The results table is often populated asynchronously.
+	if err := waitForVicResultRows(ctx, 10*time.Second); err != nil {
 		return "", err
 	}
 
 	total := decimal.Zero
-	doc.Find("tbody tr").Each(func(_ int, s *goquery.Selection) {
-		cells := s.Find("td")
-		if cells.Length() < 6 {
-			return
+	seen := make(map[string]struct{})
+	const maxPages = 50
+
+	for page := 0; page < maxPages; page++ {
+		var pageHTML string
+		if err := chromedp.Run(ctx,
+			chromedp.WaitVisible(`table`, chromedp.ByQuery),
+			chromedp.OuterHTML(`html`, &pageHTML, chromedp.ByQuery),
+		); err != nil {
+			return "", err
 		}
-		getText := func(idx int) string {
-			return strings.TrimSpace(cells.Eq(idx).Text())
+
+		doc, err := goquery.NewDocumentFromReader(strings.NewReader(pageHTML))
+		if err != nil {
+			return "", err
 		}
-		contractID := getText(0)
-		title := getText(1)
-		status := getText(2)
-		startDate := parseVicDate(getText(3))
-		endDate := parseVicDate(getText(4))
-		amount := parseVicAmount(getText(5))
-		agency := ""
-		supplier := ""
-		if cells.Length() > 6 {
-			agency = getText(6)
+
+		resultsTable := doc.Find("table").FilterFunction(func(_ int, s *goquery.Selection) bool {
+			return isVicResultsTable(s)
+		}).First()
+		if resultsTable.Length() == 0 {
+			break
 		}
-		if cells.Length() > 7 {
-			supplier = getText(7)
-		}
-		summary := MatchSummary{
-			Source:      vicSourceID,
-			ContractID:  contractID,
-			ReleaseID:   contractID,
-			OCID:        contractID,
-			Supplier:    supplier,
-			Agency:      agency,
-			Title:       buildVicTitle(title, status),
-			Amount:      amount,
-			ReleaseDate: startDate,
-		}
-		if req.OnAnyMatch != nil {
-			req.OnAnyMatch(summary)
-		}
-		if matchesSummaryFilters(req, summary, endDate) {
-			if req.OnMatch != nil {
-				req.OnMatch(summary)
+
+		resultsTable.Find("tbody tr").Each(func(_ int, s *goquery.Selection) {
+			cells := s.Find("td")
+			if cells.Length() < 6 {
+				return
 			}
-			total = total.Add(summary.Amount)
+			getText := func(idx int) string {
+				return strings.TrimSpace(cells.Eq(idx).Text())
+			}
+			contractID := getText(0)
+			if !isLikelyVicContractID(contractID) {
+				return
+			}
+			if contractID == "" {
+				return
+			}
+			if _, ok := seen[contractID]; ok {
+				return
+			}
+			seen[contractID] = struct{}{}
+
+			title := getText(1)
+			status := getText(2)
+			startDate := parseVicDate(getText(3))
+			if startDate.IsZero() {
+				return
+			}
+			endDate := parseVicDate(getText(4))
+			amount := parseVicAmount(getText(5))
+			agency := ""
+			supplier := ""
+			if cells.Length() > 6 {
+				agency = getText(6)
+			}
+			if cells.Length() > 7 {
+				supplier = getText(7)
+			}
+			summary := MatchSummary{
+				Source:      vicSourceID,
+				ContractID:  contractID,
+				ReleaseID:   contractID,
+				OCID:        contractID,
+				Supplier:    supplier,
+				Agency:      agency,
+				Title:       buildVicTitle(title, status),
+				Amount:      amount,
+				ReleaseDate: startDate,
+			}
+			if req.OnAnyMatch != nil {
+				req.OnAnyMatch(summary)
+			}
+			if matchesSummaryFilters(req, summary, endDate) {
+				if req.OnMatch != nil {
+					req.OnMatch(summary)
+				}
+				total = total.Add(summary.Amount)
+			}
+		})
+
+		var nextHref string
+		if err := chromedp.Run(ctx,
+			chromedp.EvaluateAsDevTools(
+				`(() => { const a = document.querySelector("a[aria-label='Next']:not(.disabled)"); return a ? a.getAttribute('href') : ""; })()`,
+				&nextHref,
+			),
+		); err != nil {
+			return "", err
 		}
-	})
+		nextHref = strings.TrimSpace(nextHref)
+		if nextHref == "" {
+			break
+		}
+		nextURL, err := url.Parse(nextHref)
+		if err != nil {
+			break
+		}
+		base, err := url.Parse(vicSearchURL)
+		if err != nil {
+			break
+		}
+		resolved := base.ResolveReference(nextURL)
+		if err := chromedp.Run(ctx,
+			chromedp.Navigate(resolved.String()),
+			chromedp.WaitVisible(`table`, chromedp.ByQuery),
+		); err != nil {
+			return "", err
+		}
+		if err := waitForVicResultRows(ctx, 10*time.Second); err != nil {
+			return "", err
+		}
+	}
 
 	ac := accounting.Accounting{Symbol: "$", Precision: 2}
 	return ac.FormatMoney(total), nil
+}
+
+func waitForVicResultRows(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var rowCount int
+		err := chromedp.Run(ctx,
+			chromedp.EvaluateAsDevTools(`document.querySelectorAll("table a[href*='/contract/view']").length`, &rowCount),
+		)
+		if err == nil && rowCount > 0 {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return nil
+}
+
+func isVicResultsTable(table *goquery.Selection) bool {
+	headers := make([]string, 0, 8)
+	table.Find("thead th").Each(func(_ int, s *goquery.Selection) {
+		headers = append(headers, strings.ToLower(strings.TrimSpace(s.Text())))
+	})
+	if len(headers) == 0 {
+		// Fallback when thead is absent.
+		table.Find("tr").First().Find("th").Each(func(_ int, s *goquery.Selection) {
+			headers = append(headers, strings.ToLower(strings.TrimSpace(s.Text())))
+		})
+	}
+	hay := strings.Join(headers, " | ")
+	return strings.Contains(hay, "contract") &&
+		strings.Contains(hay, "title") &&
+		(strings.Contains(hay, "value") || strings.Contains(hay, "cost"))
+}
+
+func isLikelyVicContractID(contractID string) bool {
+	contractID = strings.TrimSpace(contractID)
+	if len(contractID) < 4 {
+		return false
+	}
+	if strings.IndexFunc(contractID, func(r rune) bool {
+		return r == ' ' || r == '\n' || r == '\t' || r == '\r'
+	}) != -1 {
+		return false
+	}
+	hasDigit := false
+	for _, r := range contractID {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func fetchVicDetail(ctx context.Context, detailURL string) (string, string, error) {
