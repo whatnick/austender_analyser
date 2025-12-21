@@ -88,16 +88,25 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		valueStr := strings.TrimSpace(e.ChildText("td:nth-child(7)"))
 
 		supplier := currentSupplier
-		if supplier == "Various" || supplier == "" {
-			detailURL := e.ChildAttr("td:nth-child(2) a", "href")
-			if detailURL != "" {
-				if !strings.HasPrefix(detailURL, "http") {
-					detailURL = "https://www.tenders.wa.gov.au" + detailURL
-				}
-				fetched, err := w.fetchSupplier(detailURL)
-				if err == nil && fetched != "" {
-					supplier = fetched
-				}
+		// Always try to get the exact supplier name from the detail page.
+		// This is necessary because:
+		// 1. The search results table doesn't show the supplier.
+		// 2. The WA site sometimes ignores the supplier filter when combined with agency.
+		detailURL := e.ChildAttr("td:nth-child(2) a", "href")
+		if detailURL != "" {
+			if !strings.HasPrefix(detailURL, "http") {
+				detailURL = "https://www.tenders.wa.gov.au" + detailURL
+			}
+			fetched, err := w.fetchSupplier(detailURL)
+			if err == nil && fetched != "" {
+				supplier = fetched
+			}
+		}
+
+		// If we are searching for a specific company, ensure the result matches.
+		if req.Company != "" {
+			if !strings.Contains(strings.ToLower(supplier), strings.ToLower(req.Company)) {
+				return
 			}
 		}
 
@@ -138,10 +147,11 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		baseParams.Set("publicAuthority", req.Agency)
 	}
 
-	// If we used Keyword for supplier search, don't use it as a keyword filter
-	// unless it was explicitly provided as a keyword and we have a company.
-	if req.Keyword != "" && (req.Company != "" || req.Agency != "") {
+	// Use keyword if provided, otherwise use company name as a keyword to help filtering
+	if req.Keyword != "" {
 		baseParams.Set("keywords", req.Keyword)
+	} else if req.Company != "" {
+		baseParams.Set("keywords", req.Company)
 	}
 
 	windows := splitDateWindows(startResolved, endResolved, maxWindowDays)
