@@ -147,7 +147,7 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 	defer cache.close()
 
 	checkpointKey := cacheKey(req.Keyword, req.Company, req.Agency, req.DateType, resolvedSource)
-	_, _ = cache.loadCheckpoint(checkpointKey)
+	lastRun, _ := cache.loadCheckpoint(checkpointKey)
 	resolvedLookback := resolveLookbackPeriod(req.LookbackPeriod)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, resolvedLookback)
 
@@ -167,6 +167,12 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 		return formatMoneyDecimal(cachedTotal), true, nil
 	}
 
+	// Adjust search start to resume from checkpoint if it's within the requested range.
+	searchStart := startResolved
+	if !lastRun.IsZero() && lastRun.After(searchStart) && lastRun.Before(endResolved) {
+		searchStart = lastRun
+	}
+
 	pool := newLakeWriterPool(cache.lake)
 	userOnMatch := req.OnMatch
 	mergedOnMatch := func(summary MatchSummary) {
@@ -184,7 +190,7 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 		Company:        req.Company,
 		Agency:         req.Agency,
 		Source:         resolvedSource,
-		StartDate:      startResolved,
+		StartDate:      searchStart,
 		EndDate:        endResolved,
 		DateType:       req.DateType,
 		LookbackPeriod: resolvedLookback,

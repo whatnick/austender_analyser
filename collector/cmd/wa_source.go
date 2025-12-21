@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
 	"github.com/shopspring/decimal"
 )
@@ -86,17 +87,39 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		awardDateStr := strings.TrimSpace(e.ChildText("td:nth-child(5)"))
 		valueStr := strings.TrimSpace(e.ChildText("td:nth-child(7)"))
 
+		supplier := currentSupplier
+		if supplier == "Various" || supplier == "" {
+			detailURL := e.ChildAttr("td:nth-child(2) a", "href")
+			if detailURL != "" {
+				if !strings.HasPrefix(detailURL, "http") {
+					detailURL = "https://www.tenders.wa.gov.au" + detailURL
+				}
+				fetched, err := w.fetchSupplier(detailURL)
+				if err == nil && fetched != "" {
+					supplier = fetched
+				}
+			}
+		}
+
 		val, err := parseWaMoney(valueStr)
 		if err == nil {
 			total = total.Add(val)
 		}
 
 		if req.OnMatch != nil {
-			awardDate, _ := time.Parse("2006-01-02", awardDateStr)
+			// Try multiple date formats
+			var awardDate time.Time
+			for _, fmtStr := range []string{"2006-01-02", "02/01/2006"} {
+				if t, err := time.Parse(fmtStr, awardDateStr); err == nil {
+					awardDate = t
+					break
+				}
+			}
+
 			req.OnMatch(MatchSummary{
 				ContractID:  ref,
 				Source:      waSourceID,
-				Supplier:    currentSupplier,
+				Supplier:    supplier,
 				Agency:      agency,
 				Title:       title,
 				Amount:      val,
@@ -108,8 +131,6 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	// Build base query parameters
 	baseParams := url.Values{}
 	baseParams.Set("action", "contract-search-submit")
-	baseParams.Set("awardDateFromString", startResolved.Format("02/01/2006"))
-	baseParams.Set("awardDateToString", endResolved.Format("02/01/2006"))
 	baseParams.Set("noreset", "yes")
 	baseParams.Set("maxResults", "1000")
 
@@ -122,6 +143,8 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	if req.Keyword != "" && (req.Company != "" || req.Agency != "") {
 		baseParams.Set("keywords", req.Keyword)
 	}
+
+	windows := splitDateWindows(startResolved, endResolved, maxWindowDays)
 
 	if len(suppliers) > 0 {
 		for i, s := range suppliers {
@@ -138,25 +161,53 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 				}
 			}
 
+			for _, win := range windows {
+				if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+					continue
+				}
+
+				params := url.Values{}
+				for k, v := range baseParams {
+					params[k] = v
+				}
+				params.Set("bySupplierId", fmt.Sprintf("%d", s.ID))
+				params.Set("awardDateFromString", win.start.Format("02/01/2006"))
+				params.Set("awardDateToString", win.end.Format("02/01/2006"))
+
+				searchURL := fmt.Sprintf("%s?%s", waContractSearchURL, params.Encode())
+				err := c.Visit(searchURL)
+				if err != nil {
+					continue
+				}
+			}
+		}
+	} else if req.Agency != "" || req.Keyword != "" {
+		// Search by agency or keyword only
+		currentSupplier = "Various"
+		for i, win := range windows {
+			if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+				if req.OnProgress != nil {
+					req.OnProgress(i+1, len(windows))
+				}
+				continue
+			}
+
 			params := url.Values{}
 			for k, v := range baseParams {
 				params[k] = v
 			}
-			params.Set("bySupplierId", fmt.Sprintf("%d", s.ID))
+			params.Set("awardDateFromString", win.start.Format("02/01/2006"))
+			params.Set("awardDateToString", win.end.Format("02/01/2006"))
 
 			searchURL := fmt.Sprintf("%s?%s", waContractSearchURL, params.Encode())
 			err := c.Visit(searchURL)
 			if err != nil {
 				continue
 			}
-		}
-	} else if req.Agency != "" || req.Keyword != "" {
-		// Search by agency or keyword only
-		currentSupplier = "Various"
-		searchURL := fmt.Sprintf("%s?%s", waContractSearchURL, baseParams.Encode())
-		err := c.Visit(searchURL)
-		if err != nil {
-			return "", err
+
+			if req.OnProgress != nil {
+				req.OnProgress(i+1, len(windows))
+			}
 		}
 	}
 
@@ -220,4 +271,42 @@ func parseWaMoney(s string) (decimal.Decimal, error) {
 		return decimal.Zero, nil
 	}
 	return decimal.NewFromString(s)
+}
+
+func (w waSource) fetchSupplier(url string) (string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var suppliers []string
+	doc.Find("td").Each(func(_ int, s *goquery.Selection) {
+		txt := strings.TrimSpace(s.Text())
+		// Look for labels like "1)", "2)", etc.
+		if regexp.MustCompile(`^\d+\)$`).MatchString(txt) {
+			name := strings.TrimSpace(s.Next().Find("div").First().Text())
+			if name != "" {
+				suppliers = append(suppliers, name)
+			}
+		}
+	})
+
+	if len(suppliers) > 0 {
+		return strings.Join(suppliers, ", "), nil
+	}
+
+	return "", nil
 }
