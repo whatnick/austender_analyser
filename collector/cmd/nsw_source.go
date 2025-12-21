@@ -41,8 +41,8 @@ func newNswSource() Source {
 func (n nswSource) ID() string { return nswSourceID }
 
 func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
-	lookbackYears := resolveLookbackYears(req.LookbackYears)
-	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackYears)
+	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
+	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
 
 	// Always use monthly windows for NSW so lookbacks can run in parallel.
 	windows := splitDateWindows(startResolved, endResolved, maxWindowDays)
@@ -499,15 +499,28 @@ func buildNswSearchURL(req SearchRequest, pageNum int, dateFrom, dateTo time.Tim
 	params.Set("mode", "advanced")
 
 	query := strings.TrimSpace(req.Keyword)
-	if query == "" {
-		query = strings.TrimSpace(req.Company)
+	company := strings.TrimSpace(req.Company)
+	if company != "" {
+		if query == "" {
+			query = company
+		} else if !strings.Contains(strings.ToLower(query), strings.ToLower(company)) {
+			query = query + " " + company
+		}
 	}
 	if query != "" {
 		params.Set("query", query)
 	}
 
-	if agencyID := strings.TrimSpace(req.Agency); nswUUIDPattern.MatchString(agencyID) {
-		params.Set("agencies", agencyID)
+	agency := strings.TrimSpace(req.Agency)
+	if nswUUIDPattern.MatchString(agency) {
+		params.Set("agencies", agency)
+	} else if agency != "" {
+		// If agency is a name, add it to query if not already there
+		if query == "" {
+			params.Set("query", agency)
+		} else if !strings.Contains(strings.ToLower(query), strings.ToLower(agency)) {
+			params.Set("query", query+" "+agency)
+		}
 	}
 
 	if !dateFrom.IsZero() {

@@ -21,7 +21,7 @@ var rootCmd = &cobra.Command{
 		endRaw, _ := cmd.Flags().GetString("end-date")
 		dateType, _ := cmd.Flags().GetString("date-type")
 		sourceVal, _ := cmd.Flags().GetString("source")
-		lookbackYears, _ := cmd.Flags().GetInt("lookback-years")
+		lookbackPeriod, _ := cmd.Flags().GetInt("lookback-period")
 		verbose, _ := cmd.Flags().GetBool("verbose")
 
 		sourceVal = normalizeSourceID(sourceVal)
@@ -41,7 +41,7 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
-		scrapeAncap(keywordVal, companyName, agencyVal, sourceVal, start, end, dateType, lookbackYears, verbose)
+		scrapeAncap(keywordVal, companyName, agencyVal, sourceVal, start, end, dateType, lookbackPeriod, verbose)
 	},
 }
 
@@ -62,7 +62,7 @@ func init() {
 	rootCmd.PersistentFlags().String("start-date", "", "Optional start date (YYYY-MM-DD or RFC3339)")
 	rootCmd.PersistentFlags().String("end-date", "", "Optional end date (YYYY-MM-DD or RFC3339)")
 	rootCmd.PersistentFlags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")
-	rootCmd.PersistentFlags().Int("lookback-years", 0, "Default window (years) when start date not specified; falls back to env AUSTENDER_LOOKBACK_YEARS or 20 years")
+	rootCmd.PersistentFlags().Int("lookback-period", 0, "Default window (years) when start date not specified; falls back to env AUSTENDER_LOOKBACK_PERIOD or 20 years")
 	rootCmd.PersistentFlags().Bool("verbose", false, "Stream each matching contract as it is processed")
 }
 

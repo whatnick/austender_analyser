@@ -60,6 +60,7 @@ func ensureSourcesRegistered() {
 	registerSource(newVicSource())
 	registerSource(newNswSource())
 	registerSource(newSaSource())
+	registerSource(newWaSource())
 }
 
 func availableSources() []string {

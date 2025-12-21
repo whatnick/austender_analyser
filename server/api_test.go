@@ -14,14 +14,14 @@ import (
 )
 
 type reqBody struct {
-	Keyword       string `json:"keyword"`
-	Company       string `json:"company,omitempty"`
-	CompanyName   string `json:"companyName,omitempty"`
-	Agency        string `json:"agency,omitempty"`
-	StartDate     string `json:"startDate,omitempty"`
-	EndDate       string `json:"endDate,omitempty"`
-	DateType      string `json:"dateType,omitempty"`
-	LookbackYears int    `json:"lookbackYears,omitempty"`
+	Keyword        string `json:"keyword"`
+	Company        string `json:"company,omitempty"`
+	CompanyName    string `json:"companyName,omitempty"`
+	Agency         string `json:"agency,omitempty"`
+	StartDate      string `json:"startDate,omitempty"`
+	EndDate        string `json:"endDate,omitempty"`
+	DateType       string `json:"dateType,omitempty"`
+	LookbackPeriod int    `json:"lookbackPeriod,omitempty"`
 }
 
 func TestScrapeHandler_OK(t *testing.T) {
@@ -170,7 +170,7 @@ func TestMCPStreamable_ListTools(t *testing.T) {
 func TestMCPStreamable_AggregateCall(t *testing.T) {
 	old := runScrape
 	runScrape = func(ctx context.Context, req collector.SearchRequest) (string, error) {
-		if req.Keyword != "Lockheed" || req.LookbackYears != 5 {
+		if req.Keyword != "Lockheed" || req.LookbackPeriod != 5 {
 			t.Fatalf("unexpected aggregate request: %+v", req)
 		}
 		return "$42.00", nil
@@ -186,8 +186,8 @@ func TestMCPStreamable_AggregateCall(t *testing.T) {
 		"params": map[string]any{
 			"name": "aggregate_contracts",
 			"arguments": map[string]any{
-				"keyword":       "Lockheed",
-				"lookbackYears": 5,
+				"keyword":        "Lockheed",
+				"lookbackPeriod": 5,
 			},
 		},
 	})

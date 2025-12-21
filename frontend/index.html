@@ -183,11 +183,11 @@
             }
 
             async function sendPrompt(prompt) {
-                var lookbackYears = parseInt(lookbackInput.value, 10) || 20;
+                var lookbackPeriod = parseInt(lookbackInput.value, 10) || 20;
                 var payload = {
                     prompt: prompt,
                     prefetch: !!toggleMcp.checked,
-                    lookbackYears: lookbackYears,
+                    lookbackPeriod: lookbackPeriod,
                     useCache: !!toggleCache.checked
                 };
                 if (toggleMcp.checked && mcpConfig) {

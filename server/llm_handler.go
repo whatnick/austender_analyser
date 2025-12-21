@@ -37,7 +37,7 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prompt is required", http.StatusBadRequest)
 		return
 	}
-	lookback := req.LookbackYears
+	lookback := req.LookbackPeriod
 	if lookback <= 0 {
 		lookback = 20
 	}
@@ -104,12 +104,12 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type LLMRequest struct {
-	Prompt        string          `json:"prompt"`
-	Model         string          `json:"model,omitempty"`
-	MCPConfig     json.RawMessage `json:"mcpConfig,omitempty"`
-	Prefetch      *bool           `json:"prefetch,omitempty"`
-	LookbackYears int             `json:"lookbackYears,omitempty"`
-	UseCache      *bool           `json:"useCache,omitempty"`
+	Prompt         string          `json:"prompt"`
+	Model          string          `json:"model,omitempty"`
+	MCPConfig      json.RawMessage `json:"mcpConfig,omitempty"`
+	Prefetch       *bool           `json:"prefetch,omitempty"`
+	LookbackPeriod int             `json:"lookbackPeriod,omitempty"`
+	UseCache       *bool           `json:"useCache,omitempty"`
 }
 
 type LLMResponse struct {
@@ -130,18 +130,18 @@ var (
 )
 
 // maybePrefetchSpend tries to answer spend questions by querying the collector.
-func maybePrefetchSpend(ctx context.Context, prompt string, lookbackYears int, useCache bool) (string, error) {
-	if lookbackYears <= 0 {
-		lookbackYears = 20
+func maybePrefetchSpend(ctx context.Context, prompt string, lookbackPeriod int, useCache bool) (string, error) {
+	if lookbackPeriod <= 0 {
+		lookbackPeriod = 20
 	}
 	company, agency := parseSpendQuery(prompt)
 	if company == "" && agency == "" {
 		return "", nil
 	}
 	req := collector.SearchRequest{
-		Company:       company,
-		Agency:        agency,
-		LookbackYears: lookbackYears,
+		Company:        company,
+		Agency:         agency,
+		LookbackPeriod: lookbackPeriod,
 	}
 	var res string
 	var err error
@@ -153,7 +153,7 @@ func maybePrefetchSpend(ctx context.Context, prompt string, lookbackYears int, u
 	if err != nil {
 		return "", err
 	}
-	parts := []string{fmt.Sprintf("Prefetched spend over the last %d years: %s", lookbackYears, res)}
+	parts := []string{fmt.Sprintf("Prefetched spend over the last %d years: %s", lookbackPeriod, res)}
 	if company != "" {
 		parts = append(parts, fmt.Sprintf("company=%s", company))
 	}
@@ -164,25 +164,25 @@ func maybePrefetchSpend(ctx context.Context, prompt string, lookbackYears int, u
 }
 
 // maybePrefetchComparison handles prompts asking to compare spend between two agencies or two companies.
-func maybePrefetchComparison(ctx context.Context, prompt string, lookbackYears int, useCache bool) (string, error) {
-	if lookbackYears <= 0 {
-		lookbackYears = 20
+func maybePrefetchComparison(ctx context.Context, prompt string, lookbackPeriod int, useCache bool) (string, error) {
+	if lookbackPeriod <= 0 {
+		lookbackPeriod = 20
 	}
 	leftAgency, rightAgency := parseCompareAgencies(prompt)
 	leftCo, rightCo := parseCompareCompanies(prompt)
 
 	switch {
 	case leftAgency != "" && rightAgency != "":
-		return prefetchTwo(ctx, collector.SearchRequest{Agency: leftAgency, LookbackYears: lookbackYears}, collector.SearchRequest{Agency: rightAgency, LookbackYears: lookbackYears}, useCache)
+		return prefetchTwo(ctx, collector.SearchRequest{Agency: leftAgency, LookbackPeriod: lookbackPeriod}, collector.SearchRequest{Agency: rightAgency, LookbackPeriod: lookbackPeriod}, useCache)
 	case leftCo != "" && rightCo != "":
-		return prefetchTwo(ctx, collector.SearchRequest{Company: leftCo, LookbackYears: lookbackYears}, collector.SearchRequest{Company: rightCo, LookbackYears: lookbackYears}, useCache)
+		return prefetchTwo(ctx, collector.SearchRequest{Company: leftCo, LookbackPeriod: lookbackPeriod}, collector.SearchRequest{Company: rightCo, LookbackPeriod: lookbackPeriod}, useCache)
 	default:
 		return "", nil
 	}
 }
 
 func prefetchTwo(ctx context.Context, leftReq, rightReq collector.SearchRequest, useCache bool) (string, error) {
-	lookback := leftReq.LookbackYears
+	lookback := leftReq.LookbackPeriod
 	if lookback <= 0 {
 		lookback = 20
 	}

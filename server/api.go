@@ -17,15 +17,15 @@ import (
 )
 
 type ScrapeRequest struct {
-	Keyword       string `json:"keyword"`
-	Company       string `json:"company,omitempty"`
-	CompanyName   string `json:"companyName,omitempty"`
-	Agency        string `json:"agency,omitempty"`
-	StartDate     string `json:"startDate,omitempty"`
-	EndDate       string `json:"endDate,omitempty"`
-	DateType      string `json:"dateType,omitempty"`
-	LookbackYears int    `json:"lookbackYears,omitempty"`
-	UseCache      *bool  `json:"useCache,omitempty"`
+	Keyword        string `json:"keyword"`
+	Company        string `json:"company,omitempty"`
+	CompanyName    string `json:"companyName,omitempty"`
+	Agency         string `json:"agency,omitempty"`
+	StartDate      string `json:"startDate,omitempty"`
+	EndDate        string `json:"endDate,omitempty"`
+	DateType       string `json:"dateType,omitempty"`
+	LookbackPeriod int    `json:"lookbackPeriod,omitempty"`
+	UseCache       *bool  `json:"useCache,omitempty"`
 }
 
 type ScrapeResponse struct {
@@ -117,13 +117,13 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	searchReq := collector.SearchRequest{
-		Keyword:       req.Keyword,
-		Company:       company,
-		Agency:        req.Agency,
-		StartDate:     start,
-		EndDate:       end,
-		DateType:      req.DateType,
-		LookbackYears: req.LookbackYears,
+		Keyword:        req.Keyword,
+		Company:        company,
+		Agency:         req.Agency,
+		StartDate:      start,
+		EndDate:        end,
+		DateType:       req.DateType,
+		LookbackPeriod: req.LookbackPeriod,
 	}
 
 	var total string

@@ -28,7 +28,7 @@ Prereqs: Go 1.25+, Taskfile (<https://taskfile.dev/#/installation>) or Bash + GN
 | Run both | `task run:local` | `bash hack/run-local.sh` |
 | Run all tests | `task test:all` | `bash hack/test-all.sh` |
 | Collector CLI | `task collector:run -- --keyword KPMG` | `cd collector && go run . --keyword KPMG` |
-| Prime cache/lake | `task collector:prime-lake -- --lookback-years 5` | `bash hack/prime-datalake.sh --lookback-years 5` |
+| Prime cache/lake | `task collector:prime-lake -- --lookback-period 5` | `bash hack/prime-datalake.sh --lookback-period 5` |
 | Build collector | `task collector:build` | `bash hack/build-collector.sh` |
 | Server tests | `task server:test` | `bash hack/test-server.sh` |
 | Infra synth/deploy | `task infra:synth` / `task infra:deploy` | `cd infra && cdk synth|deploy` |

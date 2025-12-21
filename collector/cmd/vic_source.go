@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,11 @@ func newVicSource() Source {
 func (v vicSource) ID() string { return vicSourceID }
 
 func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
+	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
+	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
+	req.StartDate = startResolved
+	req.EndDate = endResolved
+
 	target := buildVicSearchURL(req)
 	if strings.EqualFold(os.Getenv("VIC_USE_BROWSER"), "true") {
 		return runVicWithBrowser(ctx, target, req)
@@ -210,15 +216,11 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 
 func buildVicSearchURL(req SearchRequest) string {
 	params := url.Values{}
-	keywords := strings.TrimSpace(req.Keyword)
-	if keywords == "" {
-		keywords = strings.TrimSpace(strings.Join(filterNonEmpty([]string{req.Company, req.Agency}), " "))
-	}
-	params.Set("keywords", keywords)
+	params.Set("keywords", strings.TrimSpace(req.Keyword))
 	params.Set("title", "")
 	params.Set("code", "")
 	params.Set("buyerId", "")
-	params.Set("supplierName", "")
+	params.Set("supplierName", strings.TrimSpace(req.Company))
 	params.Set("minCost", "")
 	params.Set("expiryDateFrom", "")
 	params.Set("expiryDateTo", "")
@@ -229,7 +231,21 @@ func buildVicSearchURL(req SearchRequest) string {
 	params.Set("browse", "false")
 	params.Set("desc", "true")
 	params.Set("orderBy", "startDate")
-	params.Set("page", "")
+
+	if agency := strings.TrimSpace(req.Agency); agency != "" {
+		// If it looks like a numeric ID, use buyerId, otherwise keywords
+		if _, err := strconv.Atoi(agency); err == nil {
+			params.Set("buyerId", agency)
+		} else {
+			// Append to keywords if not already there
+			k := params.Get("keywords")
+			if k == "" {
+				params.Set("keywords", agency)
+			} else if !strings.Contains(strings.ToLower(k), strings.ToLower(agency)) {
+				params.Set("keywords", k+" "+agency)
+			}
+		}
+	}
 
 	if !req.StartDate.IsZero() {
 		params.Set("startDateFrom", req.StartDate.Format("02/01/2006"))
@@ -574,15 +590,4 @@ func matchesSummaryFilters(req SearchRequest, summary MatchSummary, endDate time
 	}
 
 	return true
-}
-
-func filterNonEmpty(values []string) []string {
-	var out []string
-	for _, v := range values {
-		v = strings.TrimSpace(v)
-		if v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
 }

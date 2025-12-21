@@ -36,7 +36,7 @@ var cacheCmd = &cobra.Command{
 		agency, _ := cmd.Flags().GetString("agency")
 		dateType, _ := cmd.Flags().GetString("date-type")
 		source, _ := cmd.Flags().GetString("source")
-		lookbackYears, _ := cmd.Flags().GetInt("lookback-years")
+		lookbackPeriod, _ := cmd.Flags().GetInt("lookback-period")
 		cacheDir, _ := cmd.Flags().GetString("cache-dir")
 		noCache, _ := cmd.Flags().GetBool("no-cache")
 		startRaw, _ := cmd.Flags().GetString("start-date")
@@ -58,14 +58,14 @@ var cacheCmd = &cobra.Command{
 
 		if noCache {
 			_, err := RunSearch(context.Background(), SearchRequest{
-				Keyword:       keyword,
-				Company:       company,
-				Agency:        agency,
-				Source:        source,
-				StartDate:     start,
-				EndDate:       end,
-				DateType:      dateType,
-				LookbackYears: lookbackYears,
+				Keyword:        keyword,
+				Company:        company,
+				Agency:         agency,
+				Source:         source,
+				StartDate:      start,
+				EndDate:        end,
+				DateType:       dateType,
+				LookbackPeriod: lookbackPeriod,
 			})
 			return err
 		}
@@ -92,14 +92,14 @@ var cacheCmd = &cobra.Command{
 
 		pool := newLakeWriterPool(cache.lake)
 		_, err = RunSearch(context.Background(), SearchRequest{
-			Keyword:       keyword,
-			Company:       company,
-			Agency:        agency,
-			Source:        source,
-			StartDate:     start,
-			EndDate:       end,
-			DateType:      dateType,
-			LookbackYears: lookbackYears,
+			Keyword:        keyword,
+			Company:        company,
+			Agency:         agency,
+			Source:         source,
+			StartDate:      start,
+			EndDate:        end,
+			DateType:       dateType,
+			LookbackPeriod: lookbackPeriod,
 			OnAnyMatch: func(ms MatchSummary) {
 				_ = pool.write(ms)
 			},
@@ -148,14 +148,14 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 
 	checkpointKey := cacheKey(req.Keyword, req.Company, req.Agency, req.DateType, resolvedSource)
 	_, _ = cache.loadCheckpoint(checkpointKey)
-	resolvedLookback := resolveLookbackYears(req.LookbackYears)
+	resolvedLookback := resolveLookbackPeriod(req.LookbackPeriod)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, resolvedLookback)
 
 	workingReq := req
 	workingReq.Source = resolvedSource
 	workingReq.StartDate = startResolved
 	workingReq.EndDate = endResolved
-	workingReq.LookbackYears = resolvedLookback
+	workingReq.LookbackPeriod = resolvedLookback
 
 	cachedTotal, cacheHit, err := cache.queryCache(workingReq)
 	if err != nil {
@@ -180,15 +180,15 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 	}
 
 	incStr, err := runSearchFunc(ctx, SearchRequest{
-		Keyword:       req.Keyword,
-		Company:       req.Company,
-		Agency:        req.Agency,
-		Source:        resolvedSource,
-		StartDate:     startResolved,
-		EndDate:       endResolved,
-		DateType:      req.DateType,
-		LookbackYears: resolvedLookback,
-		OnMatch:       mergedOnMatch,
+		Keyword:        req.Keyword,
+		Company:        req.Company,
+		Agency:         req.Agency,
+		Source:         resolvedSource,
+		StartDate:      startResolved,
+		EndDate:        endResolved,
+		DateType:       req.DateType,
+		LookbackPeriod: resolvedLookback,
+		OnMatch:        mergedOnMatch,
 		OnAnyMatch: func(ms MatchSummary) {
 			if ms.Source == "" {
 				ms.Source = resolvedSource
@@ -254,7 +254,7 @@ func init() {
 	cacheCmd.Flags().String("agency", "", "Agency filter (optional)")
 	cacheCmd.Flags().String("source", defaultSourceID, "Data source identifier (e.g., federal)")
 	cacheCmd.Flags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")
-	cacheCmd.Flags().Int("lookback-years", defaultLookbackYears, "Default window when start not specified")
+	cacheCmd.Flags().Int("lookback-period", defaultLookbackPeriod, "Default window when start not specified")
 	cacheCmd.Flags().String("cache-dir", defaultCacheDir(), "Directory for parquet files and sqlite catalog")
 	cacheCmd.Flags().Bool("no-cache", false, "Bypass cache and run a full scrape (does not write parquet)")
 	cacheCmd.Flags().String("start-date", "", "Optional start date (YYYY-MM-DD or RFC3339)")

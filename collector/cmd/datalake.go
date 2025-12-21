@@ -201,8 +201,8 @@ func (l *dataLake) queryTotals(ctx context.Context, filters SearchRequest) (deci
 	}
 
 	// Lookback by FY if specified; stored FY values are trimmed (e.g., 2024-25), so strip any prefix.
-	if filters.LookbackYears > 0 {
-		minFy := strings.TrimPrefix(financialYearLabel(time.Now().AddDate(-filters.LookbackYears, 0, 0)), "fy=")
+	if filters.LookbackPeriod > 0 {
+		minFy := strings.TrimPrefix(financialYearLabel(time.Now().AddDate(-filters.LookbackPeriod, 0, 0)), "fy=")
 		clauses = append(clauses, "fy >= ?")
 		args = append(args, minFy)
 	}

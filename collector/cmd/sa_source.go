@@ -36,8 +36,8 @@ func newSaSource() Source {
 func (s saSource) ID() string { return saSourceID }
 
 func (s saSource) Run(ctx context.Context, req SearchRequest) (string, error) {
-	lookbackYears := resolveLookbackYears(req.LookbackYears)
-	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackYears)
+	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
+	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
 
 	windows := []dateWindow{{start: startResolved, end: endResolved}}
 	if req.ShouldFetchWindow != nil {
@@ -266,16 +266,29 @@ func buildSaSearchURL(req SearchRequest, pageNum int, startDateFrom, startDateTo
 	params := url.Values{}
 
 	keywords := strings.TrimSpace(req.Keyword)
-	if keywords == "" {
-		keywords = strings.TrimSpace(req.Company)
+	company := strings.TrimSpace(req.Company)
+	if company != "" {
+		if keywords == "" {
+			keywords = company
+		} else if !strings.Contains(strings.ToLower(keywords), strings.ToLower(company)) {
+			keywords = keywords + " " + company
+		}
 	}
 	params.Set("keywords", keywords)
 
 	params.Set("code", "")
 
 	buyerID := ""
-	if a := strings.TrimSpace(req.Agency); saBuyerIDPattern.MatchString(a) {
-		buyerID = a
+	agency := strings.TrimSpace(req.Agency)
+	if saBuyerIDPattern.MatchString(agency) {
+		buyerID = agency
+	} else if agency != "" {
+		// If agency is a name, add it to keywords if not already there
+		if keywords == "" {
+			params.Set("keywords", agency)
+		} else if !strings.Contains(strings.ToLower(keywords), strings.ToLower(agency)) {
+			params.Set("keywords", keywords+" "+agency)
+		}
 	}
 	params.Set("buyerId", buyerID)
 

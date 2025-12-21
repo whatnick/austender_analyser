@@ -66,14 +66,14 @@ func registerMCPTools(srv *mcpserver.MCPServer) {
 }
 
 type aggregateContractsArgs struct {
-	Keyword       string `json:"keyword" jsonschema:"required" jsonschema_description:"Keyword or entity to search across contracts"`
-	Company       string `json:"company,omitempty" jsonschema_description:"Supplier filter (optional)"`
-	CompanyName   string `json:"companyName,omitempty" jsonschema_description:"Alias supplier filter"`
-	Agency        string `json:"agency,omitempty" jsonschema_description:"Agency filter"`
-	StartDate     string `json:"startDate,omitempty" jsonschema_description:"Start date (YYYY-MM-DD or RFC3339)"`
-	EndDate       string `json:"endDate,omitempty" jsonschema_description:"End date (YYYY-MM-DD or RFC3339)"`
-	DateType      string `json:"dateType,omitempty" jsonschema_description:"OCDS date bucket"`
-	LookbackYears int    `json:"lookbackYears,omitempty" jsonschema_description:"Fallback lookback horizon when no start date is supplied"`
+	Keyword        string `json:"keyword" jsonschema:"required" jsonschema_description:"Keyword or entity to search across contracts"`
+	Company        string `json:"company,omitempty" jsonschema_description:"Supplier filter (optional)"`
+	CompanyName    string `json:"companyName,omitempty" jsonschema_description:"Alias supplier filter"`
+	Agency         string `json:"agency,omitempty" jsonschema_description:"Agency filter"`
+	StartDate      string `json:"startDate,omitempty" jsonschema_description:"Start date (YYYY-MM-DD or RFC3339)"`
+	EndDate        string `json:"endDate,omitempty" jsonschema_description:"End date (YYYY-MM-DD or RFC3339)"`
+	DateType       string `json:"dateType,omitempty" jsonschema_description:"OCDS date bucket"`
+	LookbackPeriod int    `json:"lookbackPeriod,omitempty" jsonschema_description:"Fallback lookback horizon when no start date is supplied"`
 }
 
 type aggregateContractsResult struct {
@@ -101,13 +101,13 @@ func handleAggregateContracts(ctx context.Context, _ mcp.CallToolRequest, args a
 	}
 
 	total, err := runScrape(ctx, collector.SearchRequest{
-		Keyword:       keyword,
-		Company:       company,
-		Agency:        strings.TrimSpace(args.Agency),
-		StartDate:     start,
-		EndDate:       end,
-		DateType:      strings.TrimSpace(args.DateType),
-		LookbackYears: args.LookbackYears,
+		Keyword:        keyword,
+		Company:        company,
+		Agency:         strings.TrimSpace(args.Agency),
+		StartDate:      start,
+		EndDate:        end,
+		DateType:       strings.TrimSpace(args.DateType),
+		LookbackPeriod: args.LookbackPeriod,
 	})
 	if err != nil {
 		return aggregateContractsResult{}, fmt.Errorf("aggregate_contracts failed: %w", err)

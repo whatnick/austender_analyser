@@ -43,18 +43,18 @@ func TestRunSearchWithCacheShortCircuitsWhenWindowsCached(t *testing.T) {
 	defer func() { runSearchFunc = oldRun }()
 
 	res, hit, err := RunSearchWithCache(context.Background(), SearchRequest{
-		Company:       "KPMG",
-		LookbackYears: 1,
-		DateType:      defaultDateType,
+		Company:        "KPMG",
+		LookbackPeriod: 1,
+		DateType:       defaultDateType,
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
 	require.Equal(t, 1, calls)
 
 	res2, hit2, err := RunSearchWithCache(context.Background(), SearchRequest{
-		Company:       "KPMG",
-		LookbackYears: 1,
-		DateType:      defaultDateType,
+		Company:        "KPMG",
+		LookbackPeriod: 1,
+		DateType:       defaultDateType,
 	})
 	require.NoError(t, err)
 	require.Equal(t, res, res2)
@@ -90,20 +90,20 @@ func TestRunSearchWithCacheConsistentLookback(t *testing.T) {
 
 	releaseTime := time.Now().AddDate(-1, 0, 0).UTC()
 	first, hit1, err := RunSearchWithCache(context.Background(), SearchRequest{
-		Agency:        "Defence",
-		LookbackYears: 3,
-		StartDate:     releaseTime,
-		EndDate:       releaseTime,
+		Agency:         "Defence",
+		LookbackPeriod: 3,
+		StartDate:      releaseTime,
+		EndDate:        releaseTime,
 	})
 	require.NoError(t, err)
 	require.False(t, hit1)
 	require.Equal(t, "$123.00", first)
 
 	second, _, err := RunSearchWithCache(context.Background(), SearchRequest{
-		Agency:        "Defence",
-		LookbackYears: 3,
-		StartDate:     releaseTime,
-		EndDate:       releaseTime,
+		Agency:         "Defence",
+		LookbackPeriod: 3,
+		StartDate:      releaseTime,
+		EndDate:        releaseTime,
 	})
 	require.NoError(t, err)
 	require.Equal(t, "$123.00", second)
@@ -141,12 +141,12 @@ func TestQueryCacheRespectsDateRange(t *testing.T) {
 	pool.closeAll()
 
 	// Lookback 3y should exclude the old record and include the recent one.
-	startResolved, endResolved := resolveDates(time.Time{}, time.Time{}, resolveLookbackYears(3))
+	startResolved, endResolved := resolveDates(time.Time{}, time.Time{}, resolveLookbackPeriod(3))
 	res, matched, err := cache.queryCache(SearchRequest{
-		Agency:        "Defence",
-		LookbackYears: 3,
-		StartDate:     startResolved,
-		EndDate:       endResolved,
+		Agency:         "Defence",
+		LookbackPeriod: 3,
+		StartDate:      startResolved,
+		EndDate:        endResolved,
 	})
 	require.NoError(t, err)
 	require.True(t, matched)

@@ -22,7 +22,7 @@ import (
 const (
 	defaultBaseURL        = "https://api.tenders.gov.au/ocds"
 	defaultDateType       = "contractPublished"
-	defaultLookbackYears  = 20
+	defaultLookbackPeriod = 20
 	defaultRequestTimeout = 0
 	maxWindowDays         = 31
 	requestMaxRetries     = 4
@@ -42,7 +42,7 @@ type SearchRequest struct {
 	StartDate         time.Time
 	EndDate           time.Time
 	DateType          string
-	LookbackYears     int
+	LookbackPeriod    int
 	OnMatch           MatchHandler
 	OnProgress        ProgressHandler
 	OnAnyMatch        MatchHandler              // called for every valued release, regardless of filters
@@ -234,8 +234,8 @@ func runFederalSearch(ctx context.Context, req SearchRequest) (string, error) {
 	}
 	defer cancel()
 
-	lookbackYears := resolveLookbackYears(req.LookbackYears)
-	start, end := resolveDates(req.StartDate, req.EndDate, lookbackYears)
+	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
+	start, end := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
 	dateType := req.DateType
 	if dateType == "" {
 		dateType = defaultDateType
@@ -558,9 +558,9 @@ func parseReleaseTime(value string) time.Time {
 	return time.Time{}
 }
 
-func resolveDates(start, end time.Time, lookbackYears int) (time.Time, time.Time) {
-	if lookbackYears <= 0 {
-		lookbackYears = defaultLookbackYears
+func resolveDates(start, end time.Time, lookbackPeriod int) (time.Time, time.Time) {
+	if lookbackPeriod <= 0 {
+		lookbackPeriod = defaultLookbackPeriod
 	}
 	endUTC := end
 	if endUTC.IsZero() {
@@ -568,7 +568,7 @@ func resolveDates(start, end time.Time, lookbackYears int) (time.Time, time.Time
 	}
 	startUTC := start
 	if startUTC.IsZero() {
-		startUTC = endUTC.AddDate(-lookbackYears, 0, 0)
+		startUTC = endUTC.AddDate(-lookbackPeriod, 0, 0)
 	}
 	if startUTC.After(endUTC) {
 		startUTC, endUTC = endUTC, startUTC
@@ -596,7 +596,7 @@ func parseDateInput(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid date %q", raw)
 }
 
-func scrapeAncap(keywordVal, companyName, agencyVal, sourceVal string, start, end time.Time, dateType string, lookbackYears int, verbose bool) {
+func scrapeAncap(keywordVal, companyName, agencyVal, sourceVal string, start, end time.Time, dateType string, lookbackPeriod int, verbose bool) {
 	var onMatch MatchHandler
 	if verbose {
 		onMatch = func(summary MatchSummary) {
@@ -626,16 +626,16 @@ func scrapeAncap(keywordVal, companyName, agencyVal, sourceVal string, start, en
 		defer progressWriter.Finish()
 	}
 	result, cacheHit, err := RunSearchWithCache(context.Background(), SearchRequest{
-		Keyword:       keywordVal,
-		Company:       companyName,
-		Agency:        agencyVal,
-		Source:        sourceVal,
-		StartDate:     start,
-		EndDate:       end,
-		DateType:      dateType,
-		LookbackYears: lookbackYears,
-		OnMatch:       onMatch,
-		OnProgress:    onProgress,
+		Keyword:        keywordVal,
+		Company:        companyName,
+		Agency:         agencyVal,
+		Source:         sourceVal,
+		StartDate:      start,
+		EndDate:        end,
+		DateType:       dateType,
+		LookbackPeriod: lookbackPeriod,
+		OnMatch:        onMatch,
+		OnProgress:     onProgress,
 	})
 	if err != nil {
 		fmt.Println("Error:", err)
@@ -711,17 +711,20 @@ func determineDefaultConcurrency() int {
 	return cores - 1
 }
 
-func resolveLookbackYears(override int) int {
+func resolveLookbackPeriod(override int) int {
 	if override > 0 {
 		return override
 	}
-	raw := strings.TrimSpace(os.Getenv("AUSTENDER_LOOKBACK_YEARS"))
+	raw := strings.TrimSpace(os.Getenv("AUSTENDER_LOOKBACK_PERIOD"))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("AUSTENDER_LOOKBACK_YEARS"))
+	}
 	if raw != "" {
 		if yrs, err := strconv.Atoi(raw); err == nil && yrs > 0 {
 			return yrs
 		}
 	}
-	return defaultLookbackYears
+	return defaultLookbackPeriod
 }
 
 func shouldRetryStatus(code int) bool {

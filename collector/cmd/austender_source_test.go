@@ -19,9 +19,9 @@ func TestParseDateInput(t *testing.T) {
 
 func TestResolveDatesDefaultLookback(t *testing.T) {
 	end := time.Date(2024, 5, 1, 0, 0, 0, 0, time.UTC)
-	start, resolvedEnd := resolveDates(time.Time{}, end, defaultLookbackYears)
+	start, resolvedEnd := resolveDates(time.Time{}, end, defaultLookbackPeriod)
 	require.Equal(t, end, resolvedEnd)
-	require.Equal(t, end.AddDate(-defaultLookbackYears, 0, 0), start)
+	require.Equal(t, end.AddDate(-defaultLookbackPeriod, 0, 0), start)
 }
 
 func TestResolveDatesCustomLookback(t *testing.T) {
@@ -122,10 +122,10 @@ func TestMatchHandlerReceivesStreamingUpdates(t *testing.T) {
 	require.Equal(t, decimal.NewFromInt(150), summaries[1].Amount)
 }
 
-func TestResolveLookbackYears(t *testing.T) {
-	require.Equal(t, 5, resolveLookbackYears(5))
-	t.Setenv("AUSTENDER_LOOKBACK_YEARS", "7")
-	require.Equal(t, 7, resolveLookbackYears(0))
-	t.Setenv("AUSTENDER_LOOKBACK_YEARS", "invalid")
-	require.Equal(t, defaultLookbackYears, resolveLookbackYears(0))
+func TestResolveLookbackPeriod(t *testing.T) {
+	require.Equal(t, 5, resolveLookbackPeriod(5))
+	t.Setenv("AUSTENDER_LOOKBACK_PERIOD", "7")
+	require.Equal(t, 7, resolveLookbackPeriod(0))
+	t.Setenv("AUSTENDER_LOOKBACK_PERIOD", "invalid")
+	require.Equal(t, defaultLookbackPeriod, resolveLookbackPeriod(0))
 }

@@ -33,7 +33,7 @@
 | All tests | `task test:all` | `bash hack/test-all.sh` |
 | Collector CLI | `task collector:run` (defaults to `--keyword Accenture`) | `cd collector && go run . --keyword KPMG` |
 | Build collector | `task collector:build` | `bash hack/build-collector.sh` |
-| Prime lake + reindex | `task collector:prime-lake -- --lookback-years 5` | `bash hack/prime-datalake.sh --lookback-years 5` |
+| Prime lake + reindex | `task collector:prime-lake -- --lookback-period 5` | `bash hack/prime-datalake.sh --lookback-period 5` |
 | Module tests | `task collector:test`, `task server:test`, `task infra:test` | `go test ./...` inside module |
 | Infra synth/deploy | `task infra:synth`, `task infra:deploy` | `cd infra && cdk synth|deploy` |
 
