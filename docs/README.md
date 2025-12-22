@@ -4,14 +4,14 @@ Welcome to the Austender Analyser project. This document captures the essentials
 
 ## What This Repo Does
 
-- Answers “how much has the government spent with <keyword>?” by scraping [Austender](https://www.tenders.gov.au) and summarising the totals.
+- Answers “how much has the government spent with <keyword>?” by scraping [Austender](https://www.tenders.gov.au) and summarising the totals across federal, NSW, VIC, SA, and WA procurement portals.
 - Provides a Go CLI (`collector`) for ad-hoc scraping, a Go HTTP/Lambda server (`server`) for API access, and AWS CDK IaC (`infra`) to deploy everything serverlessly.
 - Ships a minimal HTMX frontend (`frontend`) that hits `POST /api/llm` for quick demos, with an MCP toggle and cache prefetch control.
 - Maintains a local Parquet lake + SQLite catalog under `~/.cache/austender`, partitioned by FY/month/agency/company, with skip logic to avoid re-downloading months already present; keyword/company/agency filters stay optional when priming so you can warm the cache broadly.
 
 ## Architecture at a Glance
 
-- **Collector (`collector/`)** – Colly-based scraper + Cobra CLI. Exposes the scraping logic that the server imports via `github.com/whatnick/austender_analyser/collector`. Writes all valued releases into the Parquet lake, skips already-populated month partitions, and treats keyword/company/agency filters as optional for priming runs.
+- **Collector (`collector/`)** – Colly-based scraper + Cobra CLI. Exposes the scraping logic that the server imports via `github.com/whatnick/austender_analyser/collector`. Writes all valued releases into the Parquet lake, skips already-populated month partitions, and treats keyword/company/agency filters as optional for priming runs. Dedicated source adapters are available for federal, NSW, VIC, SA, and WA via the `--source` flag (default federal).
 - **Server (`server/`)** – HTTP handlers and `aws-lambda-go` proxy entry point. `AUSTENDER_MODE=local` runs an HTTP server on `:8080`; `AUSTENDER_MODE=lambda` serves API Gateway. Defaults to `RunSearchWithCache` so API/MCP calls leverage the lake.
 - **Infra (`infra/`)** – Go CDK stack that builds Lambda, API Gateway, S3 (static frontend), and CloudFront distribution. Uses `cdk.json` for context, default region `ap-southeast-1`.
 - **Frontend (`frontend/`)** – Static HTML/HTMX page plus `config.local.js` to point to `http://localhost:8080`; supports MCP toggle and cache prefetch flag to `/api/llm`.
@@ -32,6 +32,8 @@ Prereqs: Go 1.25+, Taskfile (<https://taskfile.dev/#/installation>) or Bash + GN
 | Build collector | `task collector:build` | `bash hack/build-collector.sh` |
 | Server tests | `task server:test` | `bash hack/test-server.sh` |
 | Infra synth/deploy | `task infra:synth` / `task infra:deploy` | `cd infra && cdk synth|deploy` |
+
+Add `--source <federal|nsw|sa|vic|wa>` to collector commands to target a specific jurisdiction; omit to scrape the federal portal.
 
 ## Development Workflow
 

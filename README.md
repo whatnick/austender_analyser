@@ -10,6 +10,7 @@ Serverless-first Go project that answers spend questions by organization/agency 
 
 ## Features
 - Collector CLI that scrapes OCDS releases and writes a partitioned Parquet lake with a SQLite catalog under `~/.cache/austender` (override via `AUSTENDER_CACHE_DIR`).
+- Multi-jurisdiction scraping via the `--source` flag with dedicated adapters for federal, NSW, VIC, SA, and WA tenders.
 - Month- and FY-partitioned lake layout (`fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>`); fetcher skips months already present in the lake to avoid re-downloading.
 - Server reuses collector logic and calls `RunSearchWithCache` by default, so API and MCP endpoints benefit from the lake and SQLite index.
 - Chat-style HTMX frontend hitting `/api/llm` with an MCP toggle; toggle also controls cache prefetch.
@@ -60,6 +61,7 @@ Prereqs: Go 1.25+, a browser. Optional: Task (https://taskfile.dev/#/installatio
     - Run all tests: `task test:all`
     - Build collector: `task collector:build`
     - Prime lake + reindex: `task collector:prime-lake -- --lookback-period 5` (filters optional; keyword/company/agency all optional)
+    - Target a specific jurisdiction: append `--source <federal|nsw|sa|vic|wa>` to any collector command (defaults to federal).
 
 - With plain scripts:
     - Start API server (localhost:8080): `bash hack/run-server.sh`
@@ -67,6 +69,7 @@ Prereqs: Go 1.25+, a browser. Optional: Task (https://taskfile.dev/#/installatio
     - Start both: `bash hack/run-local.sh`
     - Build collector: `bash hack/build-collector.sh`
     - Prime lake + reindex: `bash hack/prime-datalake.sh --lookback-period 5` (filters optional)
+    - Target a specific jurisdiction: pass `--source <federal|nsw|sa|vic|wa>` to `go run .` or the shell helpers.
 
 API quick test (without frontend):
 - POST to `http://localhost:8080/api/scrape` with JSON body `{"keyword":"KPMG"}`; response is `{ "result": "$X.XX" }`. Leave `keyword` empty to prime cache ranges.
@@ -82,6 +85,7 @@ LLM/MCP quick test:
 
 ### Architecture (high level)
 - Collector fetches OCDS releases by date windows, writes all matches (not just filtered ones) into a Parquet lake partitioned by FY/month/agency/company, and maintains a SQLite catalog. Windows with existing month partitions are skipped.
+    - The CLI exposes dedicated sources for federal Austender plus NSW, VIC, SA, and WA procurement portals via the `--source` flag.
 - Server imports collector and uses `RunSearchWithCache` by default for `/api/scrape` and `/api/llm` prefetch, so API calls leverage the lake without re-scraping.
 - Frontend is a static HTMX chat page posting to `/api/llm` with an MCP toggle; MCP config allows downstream agents to call tools.
 - Infra packages the server for Lambda/API Gateway and serves the static frontend via S3/CloudFront.

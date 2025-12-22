@@ -8,7 +8,7 @@
 - Keep the pipeline auditable end-to-end by publishing OCDS release packages and MCP tool schemas alongside every deployment artifact.
 
 ## 2. Architecture Snapshot
-- **collector/** – Colly-based scraper + Cobra CLI. Normalize every scrape into OCDS release + record structures and expose reusable helpers (`github.com/whatnick/austender_analyser/collector`) for other modules. Writes all valued releases into a partitioned Parquet lake (fy/month/agency/company) with a SQLite catalog and skips month windows already present.
+- **collector/** – Colly-based scraper + Cobra CLI. Normalize every scrape into OCDS release + record structures and expose reusable helpers (`github.com/whatnick/austender_analyser/collector`) for other modules. Supports multi-jurisdiction scraping via dedicated sources for federal, NSW, VIC, SA, and WA (selectable with `--source`). Writes all valued releases into a partitioned Parquet lake (fy/month/agency/company) with a SQLite catalog and skips month windows already present.
 - **server/** – HTTP handlers + AWS Lambda proxy integration (uses `aws-lambda-go`). Controlled by `AUSTENDER_MODE` env: `local` for `:8080` server, `lambda` for API Gateway. Hosts the MCP-compatible tool surface defined in `server/mcp_server.go`.
 - **infra/** – AWS CDK (Go) stack building Lambda, API Gateway, S3 (static site), CloudFront, and minimal state buckets to ship OCDS JSON artifacts. Default region/account pulled from `aws sts get-caller-identity` and `ap-southeast-1`.
 - **frontend/** – Static HTMX chat page that calls `/api/llm`; includes a toggle to attach MCP config (and control cache prefetch) per request. `config.local.js` overrides API base and default MCP config for local runs.
@@ -39,11 +39,12 @@
 
 ## 5. Development Workflow Expectations
 1. **Design in collector first** – Any scraping, parsing, or data munging lives in the collector module so the server can import it directly.
-2. **Keep API + Lambda parity** – When updating request/response structs in `server/`, ensure both the HTTP handler and `HandleLambdaRequest` share the same validation, error handling, and payload shapes.
-3. **Stateless frontend** – The HTMX chat frontend stays static; configuration (API base, MCP config, prefetch default) goes through `config.local.js` or the CDN-deployed bundle.
-4. **Testing** – Extend/author Go unit tests alongside code. Avoid live Austender calls in tests; prefer fixtures/mocks to keep CI deterministic.
-5. **Formatting & linting** – Rely on `go fmt` and idiomatic Go. If Copilot offers unclear code, add succinct comments explaining complex logic.
-6. **Dependency hygiene** – Run `go mod tidy` in the affected module when dependencies change. Avoid cross-module imports except via the published module paths.
+2. **Keep state sources consistent** – When adding a new jurisdiction, mirror the pattern in `collector/cmd/*_source.go`, register it in `ensureSourcesRegistered`, and extend fixtures/tests so `task collector:test` covers the new source end-to-end.
+3. **Keep API + Lambda parity** – When updating request/response structs in `server/`, ensure both the HTTP handler and `HandleLambdaRequest` share the same validation, error handling, and payload shapes.
+4. **Stateless frontend** – The HTMX chat frontend stays static; configuration (API base, MCP config, prefetch default) goes through `config.local.js` or the CDN-deployed bundle.
+5. **Testing** – Extend/author Go unit tests alongside code. Avoid live Austender calls in tests; prefer fixtures/mocks to keep CI deterministic.
+6. **Formatting & linting** – Rely on `go fmt` and idiomatic Go. If Copilot offers unclear code, add succinct comments explaining complex logic.
+7. **Dependency hygiene** – Run `go mod tidy` in the affected module when dependencies change. Avoid cross-module imports except via the published module paths.
 
 ## 6. Infrastructure & Deployment Notes
 - Lambda builds use `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`. `server/Taskfile.yml` handles packaging into `dist/main.zip`.

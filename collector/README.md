@@ -1,6 +1,7 @@
 # Collector
 - CLI Tool built on [colly](http://go-colly.org/)
 - Shared scraping and cache logic imported by the server
+- Multi-source scraping via the `--source` flag (federal default) with dedicated adapters for NSW, VIC, SA, and WA portals.
 
 ## Roadmap
 - Go Testing , target coverage 80%
@@ -19,3 +20,4 @@
 - Prime lake and reindex (shell): `bash ../hack/prime-datalake.sh --lookback-period 5`
 - Build binary: `task collector:build` or `bash ../hack/build-collector.sh`
 - Query with cache: `go run . cache --keyword KPMG` (all filters optional)
+- Target another jurisdiction: append `--source <federal|nsw|sa|vic|wa>` to collector commands.
