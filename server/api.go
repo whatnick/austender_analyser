@@ -21,6 +21,7 @@ type ScrapeRequest struct {
 	Company        string `json:"company,omitempty"`
 	CompanyName    string `json:"companyName,omitempty"`
 	Agency         string `json:"agency,omitempty"`
+	Source         string `json:"source,omitempty"`
 	StartDate      string `json:"startDate,omitempty"`
 	EndDate        string `json:"endDate,omitempty"`
 	DateType       string `json:"dateType,omitempty"`
@@ -71,11 +72,18 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		if req.Agency == "" {
 			req.Agency = r.Form.Get("agency")
 		}
+		if req.Source == "" {
+			req.Source = r.Form.Get("source")
+		}
 	}
 
 	// If keyword still missing, allow empty to support full-lake prime queries.
 	if req.Keyword == "" {
 		req.Keyword = r.Form.Get("keyword")
+	}
+
+	if req.Source == "" {
+		req.Source = r.Form.Get("source")
 	}
 
 	if req.StartDate == "" {
@@ -102,12 +110,12 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 
 	start, err := parseRequestDate(req.StartDate)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid startDate: %v", err), http.StatusBadRequest)
+		sendJSONError(w, fmt.Sprintf("invalid startDate: %v", err), http.StatusBadRequest)
 		return
 	}
 	end, err := parseRequestDate(req.EndDate)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid endDate: %v", err), http.StatusBadRequest)
+		sendJSONError(w, fmt.Sprintf("invalid endDate: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -120,6 +128,7 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		Keyword:        req.Keyword,
 		Company:        company,
 		Agency:         req.Agency,
+		Source:         req.Source,
 		StartDate:      start,
 		EndDate:        end,
 		DateType:       req.DateType,
@@ -134,7 +143,7 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		log.Printf("collector error: keyword=%q company=%q agency=%q start=%q end=%q err=%v", req.Keyword, company, req.Agency, req.StartDate, req.EndDate, err)
-		http.Error(w, "Error running collector", http.StatusInternalServerError)
+		sendJSONError(w, "Error running collector", http.StatusInternalServerError)
 		return
 	}
 
@@ -210,4 +219,10 @@ func RegisterHandlers() {
 	http.Handle("/api/mcp", mcpHandler)
 	http.Handle("/api/mcp/", mcpHandler)
 	http.HandleFunc("/api/llm", llmHandler)
+}
+
+func sendJSONError(w http.ResponseWriter, message string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": message, "result": "Error: " + message})
 }

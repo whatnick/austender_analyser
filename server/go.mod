@@ -7,6 +7,7 @@ toolchain go1.25.5
 require (
 	github.com/aws/aws-lambda-go v1.51.1
 	github.com/mark3labs/mcp-go v0.43.2
+	github.com/stretchr/testify v1.10.0
 	github.com/tmc/langchaingo v0.1.14
 	github.com/whatnick/austender_analyser/collector v0.0.0
 )
@@ -25,6 +26,7 @@ require (
 	github.com/chromedp/chromedp v0.14.2 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/cockroachdb/apd v1.1.0 // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
@@ -53,6 +55,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.23 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pkoukk/tiktoken-go v0.1.8 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect

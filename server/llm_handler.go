@@ -34,7 +34,7 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	var req LLMRequest
 	decErr := json.NewDecoder(r.Body).Decode(&req)
 	if decErr != nil {
-		http.Error(w, "prompt is required", http.StatusBadRequest)
+		sendJSONError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	lookback := req.LookbackPeriod
@@ -53,7 +53,7 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		req.MCPConfig = defaultMCPConfig()
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
-		http.Error(w, "prompt is required", http.StatusBadRequest)
+		sendJSONError(w, "prompt is required", http.StatusBadRequest)
 		return
 	}
 
@@ -66,13 +66,18 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	mcpContext := strings.TrimSpace(string(req.MCPConfig))
 	basePrompt := req.Prompt
 
+	source := strings.TrimSpace(req.Source)
+	if source == "" {
+		source = parseSourceFromPrompt(req.Prompt)
+	}
+
 	var prefetchedContext string
 	// If allowed and the prompt looks like a spend query, prefetch using the collector cache and inject context.
 	if prefetchAllowed {
-		if pre, err := maybePrefetchComparison(r.Context(), req.Prompt, lookback, useCache); err == nil && pre != "" {
+		if pre, err := maybePrefetchComparison(r.Context(), req.Prompt, source, lookback, useCache); err == nil && pre != "" {
 			prefetchedContext = pre
 			basePrompt = pre + "\n\n" + basePrompt
-		} else if pre, err := maybePrefetchSpend(r.Context(), req.Prompt, lookback, useCache); err == nil && pre != "" {
+		} else if pre, err := maybePrefetchSpend(r.Context(), req.Prompt, source, lookback, useCache); err == nil && pre != "" {
 			prefetchedContext = pre
 			basePrompt = pre + "\n\n" + basePrompt
 		}
@@ -84,7 +89,11 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 
 	client, err := newLLMClient(modelName)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("llm init failed: %v", err), http.StatusInternalServerError)
+		msg := fmt.Sprintf("llm init failed: %v", err)
+		if strings.Contains(msg, "OPENAI_API_KEY") || strings.Contains(msg, "no API key") {
+			msg = "LLM initialization failed: OPENAI_API_KEY is not set in the environment. Please set it to use the chat feature."
+		}
+		sendJSONError(w, msg, http.StatusInternalServerError)
 		return
 	}
 
@@ -95,7 +104,7 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := llms.GenerateFromSinglePrompt(ctx, client, fullPrompt)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("llm error: %v", err), http.StatusInternalServerError)
+		sendJSONError(w, fmt.Sprintf("llm error: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -106,6 +115,7 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 type LLMRequest struct {
 	Prompt         string          `json:"prompt"`
 	Model          string          `json:"model,omitempty"`
+	Source         string          `json:"source,omitempty"`
 	MCPConfig      json.RawMessage `json:"mcpConfig,omitempty"`
 	Prefetch       *bool           `json:"prefetch,omitempty"`
 	LookbackPeriod int             `json:"lookbackPeriod,omitempty"`
@@ -130,7 +140,7 @@ var (
 )
 
 // maybePrefetchSpend tries to answer spend questions by querying the collector.
-func maybePrefetchSpend(ctx context.Context, prompt string, lookbackPeriod int, useCache bool) (string, error) {
+func maybePrefetchSpend(ctx context.Context, prompt string, source string, lookbackPeriod int, useCache bool) (string, error) {
 	if lookbackPeriod <= 0 {
 		lookbackPeriod = 20
 	}
@@ -141,6 +151,7 @@ func maybePrefetchSpend(ctx context.Context, prompt string, lookbackPeriod int, 
 	req := collector.SearchRequest{
 		Company:        company,
 		Agency:         agency,
+		Source:         source,
 		LookbackPeriod: lookbackPeriod,
 	}
 	var res string
@@ -154,6 +165,9 @@ func maybePrefetchSpend(ctx context.Context, prompt string, lookbackPeriod int, 
 		return "", err
 	}
 	parts := []string{fmt.Sprintf("Prefetched spend over the last %d years: %s", lookbackPeriod, res)}
+	if source != "" {
+		parts = append(parts, fmt.Sprintf("source=%s", source))
+	}
 	if company != "" {
 		parts = append(parts, fmt.Sprintf("company=%s", company))
 	}
@@ -164,7 +178,7 @@ func maybePrefetchSpend(ctx context.Context, prompt string, lookbackPeriod int, 
 }
 
 // maybePrefetchComparison handles prompts asking to compare spend between two agencies or two companies.
-func maybePrefetchComparison(ctx context.Context, prompt string, lookbackPeriod int, useCache bool) (string, error) {
+func maybePrefetchComparison(ctx context.Context, prompt string, source string, lookbackPeriod int, useCache bool) (string, error) {
 	if lookbackPeriod <= 0 {
 		lookbackPeriod = 20
 	}
@@ -173,9 +187,9 @@ func maybePrefetchComparison(ctx context.Context, prompt string, lookbackPeriod 
 
 	switch {
 	case leftAgency != "" && rightAgency != "":
-		return prefetchTwo(ctx, collector.SearchRequest{Agency: leftAgency, LookbackPeriod: lookbackPeriod}, collector.SearchRequest{Agency: rightAgency, LookbackPeriod: lookbackPeriod}, useCache)
+		return prefetchTwo(ctx, collector.SearchRequest{Agency: leftAgency, Source: source, LookbackPeriod: lookbackPeriod}, collector.SearchRequest{Agency: rightAgency, Source: source, LookbackPeriod: lookbackPeriod}, useCache)
 	case leftCo != "" && rightCo != "":
-		return prefetchTwo(ctx, collector.SearchRequest{Company: leftCo, LookbackPeriod: lookbackPeriod}, collector.SearchRequest{Company: rightCo, LookbackPeriod: lookbackPeriod}, useCache)
+		return prefetchTwo(ctx, collector.SearchRequest{Company: leftCo, Source: source, LookbackPeriod: lookbackPeriod}, collector.SearchRequest{Company: rightCo, Source: source, LookbackPeriod: lookbackPeriod}, useCache)
 	default:
 		return "", nil
 	}
@@ -304,6 +318,37 @@ func extractAfter(s, marker string) string {
 		return ""
 	}
 	return strings.TrimSpace(s[idx+len(marker):])
+}
+
+// parseSourceFromPrompt looks for keywords like "federal", "vic", "nsw", "sa", "wa" in the prompt.
+func parseSourceFromPrompt(prompt string) string {
+	p := strings.ToLower(prompt)
+
+	// Check special cases first (longer names)
+	if strings.Contains(p, "victoria") {
+		return "vic"
+	}
+	if strings.Contains(p, "new south wales") {
+		return "nsw"
+	}
+	if strings.Contains(p, "south australia") {
+		return "sa"
+	}
+	if strings.Contains(p, "western australia") {
+		return "wa"
+	}
+
+	// Check for exact matches with word boundaries for short codes
+	sources := collector.AvailableSources()
+	for _, s := range sources {
+		// Simple word boundary check
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(s) + `\b`)
+		if re.MatchString(p) {
+			return s
+		}
+	}
+
+	return ""
 }
 
 // Helper to detect available MCP config path via env for defaults.

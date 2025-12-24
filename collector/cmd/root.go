@@ -54,7 +54,7 @@ func Execute() {
 
 func init() {
 	ensureSourcesRegistered()
-	sourceHelp := fmt.Sprintf("Data source identifier (%s)", strings.Join(availableSources(), ", "))
+	sourceHelp := fmt.Sprintf("Data source identifier (%s)", strings.Join(AvailableSources(), ", "))
 	rootCmd.PersistentFlags().String("c", "", "Company to scan")
 	rootCmd.PersistentFlags().String("d", "", "Department/agency to scan")
 	rootCmd.PersistentFlags().String("k", "", "Keywords to scan")

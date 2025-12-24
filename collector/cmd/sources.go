@@ -63,7 +63,7 @@ func ensureSourcesRegistered() {
 	registerSource(newWaSource())
 }
 
-func availableSources() []string {
+func AvailableSources() []string {
 	ensureSourcesRegistered()
 	var keys []string
 	for key := range sourceRegistry {
