@@ -43,6 +43,7 @@ type SearchRequest struct {
 	EndDate           time.Time
 	DateType          string
 	LookbackPeriod    int
+	Verbose           bool
 	OnMatch           MatchHandler
 	OnProgress        ProgressHandler
 	OnAnyMatch        MatchHandler              // called for every valued release, regardless of filters
@@ -634,6 +635,7 @@ func scrapeAncap(keywordVal, companyName, agencyVal, sourceVal string, start, en
 		EndDate:        end,
 		DateType:       dateType,
 		LookbackPeriod: lookbackPeriod,
+		Verbose:        verbose,
 		OnMatch:        onMatch,
 		OnProgress:     onProgress,
 	})

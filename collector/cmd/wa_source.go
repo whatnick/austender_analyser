@@ -47,13 +47,16 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	var suppliers []waSupplier
 	if supplierSearchTerm != "" {
 		var err error
-		suppliers, err = w.findSuppliers(supplierSearchTerm)
+		suppliers, err = w.findSuppliers(supplierSearchTerm, req.Verbose)
 		if err != nil {
 			return "", fmt.Errorf("failed to find suppliers: %w", err)
 		}
 	}
 
 	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
+	if req.Verbose {
+		fmt.Printf("Lookback period: %d\n", lookbackPeriod)
+	}
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
 
 	total := decimal.Zero
@@ -155,8 +158,49 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	}
 
 	windows := splitDateWindows(startResolved, endResolved, maxWindowDays)
+	if req.Verbose {
+		fmt.Printf("Searching %d date windows from %v to %v\n", len(windows), startResolved, endResolved)
+	}
 
 	if len(suppliers) > 0 {
+		for i, s := range suppliers {
+			currentSupplier = s.Name
+			if req.OnProgress != nil {
+				req.OnProgress(i, len(suppliers))
+			}
+
+			// Filter suppliers by name if we searched by name
+			if supplierSearchTerm != "" {
+				isNumeric := regexp.MustCompile(`^[0-9\s]+$`).MatchString(supplierSearchTerm)
+				if !isNumeric && !strings.Contains(strings.ToLower(s.Name), strings.ToLower(supplierSearchTerm)) {
+					continue
+				}
+			}
+
+			for _, win := range windows {
+				if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+					continue
+				}
+
+				params := url.Values{}
+				for k, v := range baseParams {
+					params[k] = v
+				}
+				params.Set("bySupplierId", fmt.Sprintf("%d", s.ID))
+				params.Set("awardDateFromString", win.start.Format("02/01/2006"))
+				params.Set("awardDateToString", win.end.Format("02/01/2006"))
+
+				searchURL := fmt.Sprintf("%s?%s", waContractSearchURL, params.Encode())
+				if req.Verbose {
+					fmt.Printf("Visiting: %s\n", searchURL)
+				}
+				err := c.Visit(searchURL)
+				if err != nil {
+					continue
+				}
+			}
+		}
+	} else if req.Agency != "" || req.Keyword != "" {
 		for i, s := range suppliers {
 			currentSupplier = s.Name
 			if req.OnProgress != nil {
@@ -232,7 +276,7 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	return formatMoneyDecimal(total), nil
 }
 
-func (w waSource) findSuppliers(keyword string) ([]waSupplier, error) {
+func (w waSource) findSuppliers(keyword string, verbose bool) ([]waSupplier, error) {
 	u, _ := url.Parse(waSupplierSearchURL)
 	q := u.Query()
 
@@ -268,7 +312,9 @@ func (w waSource) findSuppliers(keyword string) ([]waSupplier, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&suppliers); err != nil {
 		return nil, err
 	}
-
+	if verbose {
+		fmt.Printf("Found %d suppliers for keyword %s\n", len(suppliers), keyword)
+	}
 	return suppliers, nil
 }
 

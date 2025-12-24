@@ -99,7 +99,12 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 				return
 			}
 			getText := func(idx int) string {
-				return strings.TrimSpace(cells.Eq(idx).Text())
+				cell := cells.Eq(idx)
+				content := cell.Find(".tablesaw-cell-content")
+				if content.Length() > 0 {
+					return strings.TrimSpace(content.Text())
+				}
+				return strings.TrimSpace(cell.Text())
 			}
 			contractID := getText(0)
 			if !isLikelyVicContractID(contractID) {
@@ -140,6 +145,20 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 						supplier = detailSupplier
 					}
 				}
+			}
+
+			if supplier == "" && req.Company != "" {
+				supplier = req.Company
+			}
+			if agency == "" && req.Agency != "" {
+				agency = req.Agency
+			}
+
+			if supplier == "" && req.Company != "" {
+				supplier = req.Company
+			}
+			if agency == "" && req.Agency != "" {
+				agency = req.Agency
 			}
 
 			summary := MatchSummary{
@@ -334,7 +353,12 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 				return
 			}
 			getText := func(idx int) string {
-				return strings.TrimSpace(cells.Eq(idx).Text())
+				cell := cells.Eq(idx)
+				content := cell.Find(".tablesaw-cell-content")
+				if content.Length() > 0 {
+					return strings.TrimSpace(content.Text())
+				}
+				return strings.TrimSpace(cell.Text())
 			}
 			contractID := getText(0)
 			if !isLikelyVicContractID(contractID) {
@@ -364,6 +388,14 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 			if cells.Length() > 7 {
 				supplier = getText(7)
 			}
+
+			if supplier == "" && req.Company != "" {
+				supplier = req.Company
+			}
+			if agency == "" && req.Agency != "" {
+				agency = req.Agency
+			}
+
 			summary := MatchSummary{
 				Source:      vicSourceID,
 				ContractID:  contractID,
@@ -484,6 +516,14 @@ func isLikelyVicContractID(contractID string) bool {
 }
 
 func fetchVicDetail(ctx context.Context, detailURL string) (string, string, error) {
+	agency, supplier, err := fetchVicDetailWithColly(ctx, detailURL)
+	if err == nil && (agency != "" || supplier != "") {
+		return agency, supplier, nil
+	}
+	return fetchVicDetailWithBrowser(ctx, detailURL)
+}
+
+func fetchVicDetailWithColly(ctx context.Context, detailURL string) (string, string, error) {
 	collector := colly.NewCollector(
 		colly.AllowedDomains("www.tenders.vic.gov.au", "tenders.vic.gov.au"),
 		colly.UserAgent(vicUserAgent),
@@ -590,4 +630,43 @@ func matchesSummaryFilters(req SearchRequest, summary MatchSummary, endDate time
 	}
 
 	return true
+}
+
+func fetchVicDetailWithBrowser(ctx context.Context, detailURL string) (string, string, error) {
+	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.UserAgent(vicUserAgent),
+	)
+	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+	defer cancelCtx()
+	defer cancel()
+
+	var htmlContent string
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(detailURL),
+		chromedp.WaitVisible(`table`, chromedp.ByQuery),
+		chromedp.OuterHTML(`html`, &htmlContent, chromedp.ByQuery),
+	); err != nil {
+		return "", "", err
+	}
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
+	if err != nil {
+		return "", "", err
+	}
+
+	var agency, supplier string
+	doc.Find("table tr").Each(func(_ int, tr *goquery.Selection) {
+		label := strings.ToLower(strings.TrimSpace(tr.Find("th").Text()))
+		val := strings.TrimSpace(tr.Find("td").Text())
+		switch label {
+		case "issued by":
+			agency = val
+		case "supplier":
+			supplier = val
+		}
+	})
+
+	return agency, supplier, nil
 }

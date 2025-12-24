@@ -170,7 +170,12 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 	// Adjust search start to resume from checkpoint if it's within the requested range.
 	searchStart := startResolved
 	if !lastRun.IsZero() && lastRun.After(searchStart) && lastRun.Before(endResolved) {
-		searchStart = lastRun
+		// Only truncate if we actually have data in the lake for the period before lastRun.
+		// This ensures that if a new source is added or a previous run was incomplete,
+		// we fill the gaps instead of just resuming from a potentially empty checkpoint.
+		if windowsCached(cache.lake, resolvedSource, startResolved, lastRun) {
+			searchStart = lastRun
+		}
 	}
 
 	pool := newLakeWriterPool(cache.lake)
@@ -194,6 +199,7 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 		EndDate:        endResolved,
 		DateType:       req.DateType,
 		LookbackPeriod: resolvedLookback,
+		Verbose:        req.Verbose,
 		OnMatch:        mergedOnMatch,
 		OnAnyMatch: func(ms MatchSummary) {
 			if ms.Source == "" {
