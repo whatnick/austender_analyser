@@ -18,8 +18,7 @@ import (
 )
 
 // This test is opt-in (build tag `llama_integration`) and exercises the /api/llm endpoint
-// using a local CPU-only llamacpp model. It stubs prefetching via prefetch=false and
-// overrides the LLM constructor.
+// using a local CPU-only llamacpp model, overriding the LLM constructor.
 func TestLLMHandlerWithLlamaCPP(t *testing.T) {
 	if os.Getenv("LOCAL_LLM") == "" {
 		t.Skip("LOCAL_LLM not set; skipping CPU-only llamacpp integration test")
@@ -48,8 +47,7 @@ func TestLLMHandlerWithLlamaCPP(t *testing.T) {
 	defer srv.Close()
 
 	payload := map[string]any{
-		"prompt":   "Hello from llamacpp",
-		"prefetch": false, // disable collector prefetch
+		"prompt": "Hello from llamacpp",
 	}
 	body, _ := json.Marshal(payload)
 

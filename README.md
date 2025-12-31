@@ -13,7 +13,7 @@ Serverless-first Go project that answers spend questions by organization/agency 
 - Multi-jurisdiction scraping via the `--source` flag with dedicated adapters for federal, NSW, VIC, SA, and WA tenders.
 - Month- and FY-partitioned lake layout (`fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>`); fetcher skips months already present in the lake to avoid re-downloading.
 - Server reuses collector logic and calls `RunSearchWithCache` by default, so API and MCP endpoints benefit from the lake and SQLite index.
-- Chat-style HTMX frontend hitting `/api/llm` with an MCP toggle; toggle also controls cache prefetch.
+- Chat-style HTMX frontend hitting `/api/llm` with an MCP toggle.
 - Temporal aggregate spend on raw AUD values (not inflation adjusted).
 - Serverless-ready infra in AWS (CDK stack for Lambda + API Gateway + S3 + CloudFront).
 
@@ -40,7 +40,7 @@ The repository is organized as follows:
 
 - `collector/` – CLI and shared scraping logic; writes/reads the Parquet lake and SQLite catalog.
 - `server/` – HTTP + Lambda entry that imports collector and defaults to cached lookups.
-- `frontend/` – Static HTMX chat page with MCP toggle and cache prefetch control.
+- `frontend/` – Static HTMX chat page with MCP toggle.
 - `infra/` – AWS CDK stack for Lambda, API Gateway, S3, and CloudFront.
 - `docs/` – Onboarding and screenshots.
 - `hack/` – Helper scripts (`run-*`, `build-collector.sh`, `prime-datalake.sh`).
@@ -75,18 +75,17 @@ API quick test (without frontend):
 - POST to `http://localhost:8080/api/scrape` with JSON body `{"keyword":"KPMG"}`; response is `{ "result": "$X.XX" }`. Leave `keyword` empty to prime cache ranges.
 
 LLM/MCP quick test:
-- POST to `http://localhost:8080/api/llm` with `{ "prompt": "How much was spent by Department of Defence?", "prefetch": true }` to include cache context, or set `prefetch` false to skip collector queries. Attach `mcpConfig` JSON to allow the model to call tools.
+- POST to `http://localhost:8080/api/llm` with `{ "prompt": "How much was spent by Department of Defence?" }`. Attach `mcpConfig` JSON to allow the model (or your agent tooling) to call tools.
 
 ### MCP-friendly chat frontend
 
 - Open `frontend/index.html` (or run `task run:frontend`) and use the chat box to ask spend questions.
-- Toggle “Enable MCP backend” to attach the MCP config from `frontend/config.local.js` to `/api/llm` calls. When off, the server also skips cache prefetch to isolate pure LLM responses.
-- Responses include any prefetched cache context when the server can answer locally.
+- Toggle “Enable MCP backend” to attach the MCP config from `frontend/config.local.js` to `/api/llm` calls.
 
 ### Architecture (high level)
 - Collector fetches OCDS releases by date windows, writes all matches (not just filtered ones) into a Parquet lake partitioned by FY/month/agency/company, and maintains a SQLite catalog. Windows with existing month partitions are skipped.
     - The CLI exposes dedicated sources for federal Austender plus NSW, VIC, SA, and WA procurement portals via the `--source` flag.
-- Server imports collector and uses `RunSearchWithCache` by default for `/api/scrape` and `/api/llm` prefetch, so API calls leverage the lake without re-scraping.
+- Server imports collector and uses `RunSearchWithCache` by default for `/api/scrape`, so API calls leverage the lake without re-scraping.
 - Frontend is a static HTMX chat page posting to `/api/llm` with an MCP toggle; MCP config allows downstream agents to call tools.
 - Infra packages the server for Lambda/API Gateway and serves the static frontend via S3/CloudFront.
 

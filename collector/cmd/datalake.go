@@ -35,30 +35,38 @@ func (l *dataLake) ensureSchema() error {
 		source TEXT NOT NULL,
         fy TEXT NOT NULL,
         agency_key TEXT NOT NULL,
+		agency_name TEXT NOT NULL,
         company_key TEXT NOT NULL,
+		company_name TEXT NOT NULL,
         row_count INTEGER NOT NULL,
         created_at TEXT NOT NULL
     );
 	CREATE INDEX IF NOT EXISTS idx_parquet_files_keys ON parquet_files(source, fy, agency_key, company_key);
+	CREATE INDEX IF NOT EXISTS idx_parquet_files_agency_name ON parquet_files(source, agency_name);
+	CREATE INDEX IF NOT EXISTS idx_parquet_files_company_name ON parquet_files(source, company_name);
     `
 	if _, err := l.db.Exec(schema); err != nil {
 		return err
 	}
 	// Legacy catalogs might miss the source column; add it with a default when absent.
 	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN source TEXT NOT NULL DEFAULT 'federal'")
+	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN agency_name TEXT NOT NULL DEFAULT ''")
+	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN company_name TEXT NOT NULL DEFAULT ''")
 	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_source ON parquet_files(source)")
 	return nil
 }
 
 type lakeSink struct {
-	w          *parquet.GenericWriter[parquetRow]
-	file       *os.File
-	lake       *dataLake
-	sourceKey  string
-	fy         string
-	agencyKey  string
-	companyKey string
-	rows       int64
+	w           *parquet.GenericWriter[parquetRow]
+	file        *os.File
+	lake        *dataLake
+	sourceKey   string
+	fy          string
+	agencyKey   string
+	agencyName  string
+	companyKey  string
+	companyName string
+	rows        int64
 }
 
 // lakeWriterPool lazily opens sinks per partition derived from match content.
@@ -96,7 +104,7 @@ func (l *dataLake) newSink(source string, ts time.Time, agency, company string) 
 		return nil, err
 	}
 	w := parquet.NewGenericWriter[parquetRow](f, parquet.Compression(&snappy.Codec{}))
-	return &lakeSink{w: w, file: f, lake: l, sourceKey: sourceKey, fy: fy, agencyKey: ag, companyKey: co}, nil
+	return &lakeSink{w: w, file: f, lake: l, sourceKey: sourceKey, fy: fy, agencyKey: ag, agencyName: strings.TrimSpace(agency), companyKey: co, companyName: strings.TrimSpace(company)}, nil
 }
 
 func (s *lakeSink) write(ms MatchSummary) {
@@ -128,7 +136,7 @@ func (s *lakeSink) close() {
 		_ = s.file.Close()
 	}
 	if s.lake != nil && s.rows > 0 {
-		_, _ = s.lake.db.Exec("INSERT OR REPLACE INTO parquet_files(path, source, fy, agency_key, company_key, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)", s.file.Name(), s.sourceKey, s.fy, s.agencyKey, s.companyKey, s.rows, time.Now().UTC().Format(time.RFC3339))
+		_, _ = s.lake.db.Exec("INSERT OR REPLACE INTO parquet_files(path, source, fy, agency_key, agency_name, company_key, company_name, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", s.file.Name(), s.sourceKey, s.fy, s.agencyKey, s.agencyName, s.companyKey, s.companyName, s.rows, time.Now().UTC().Format(time.RFC3339))
 	}
 }
 
@@ -176,7 +184,7 @@ func (l *dataLake) rebuildIndex(ctx context.Context) error {
 		if countErr != nil {
 			return nil
 		}
-		_, _ = l.db.ExecContext(ctx, "INSERT OR REPLACE INTO parquet_files(path, source, fy, agency_key, company_key, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)", path, src, fy, ag, co, rowCount, time.Now().UTC().Format(time.RFC3339))
+		_, _ = l.db.ExecContext(ctx, "INSERT OR REPLACE INTO parquet_files(path, source, fy, agency_key, agency_name, company_key, company_name, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", path, src, fy, ag, ag, co, co, rowCount, time.Now().UTC().Format(time.RFC3339))
 		return nil
 	})
 }

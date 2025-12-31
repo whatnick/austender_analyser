@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	collector "github.com/whatnick/austender_analyser/collector/cmd"
@@ -49,6 +50,144 @@ var runScrape = func(ctx context.Context, req collector.SearchRequest) (string, 
 	return res, err
 }
 
+type scrapeDailyCacheEntry struct {
+	value   string
+	expires time.Time
+	ready   chan struct{}
+}
+
+type scrapeDailyCache struct {
+	mu    sync.Mutex
+	items map[string]*scrapeDailyCacheEntry
+}
+
+func (c *scrapeDailyCache) getOrCompute(ctx context.Context, key string, expires time.Time, compute func() (string, error)) (string, error) {
+	for {
+		now := time.Now()
+		c.mu.Lock()
+		if c.items == nil {
+			c.items = map[string]*scrapeDailyCacheEntry{}
+		}
+		if e, ok := c.items[key]; ok {
+			// If entry is valid, either return it or wait for in-flight completion.
+			if now.Before(e.expires) {
+				if e.ready != nil {
+					ch := e.ready
+					c.mu.Unlock()
+					select {
+					case <-ch:
+						// loop and re-check cache
+						continue
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
+				}
+				val := e.value
+				c.mu.Unlock()
+				return val, nil
+			}
+			// Expired
+			delete(c.items, key)
+		}
+
+		// Cache miss: create an in-flight entry.
+		e := &scrapeDailyCacheEntry{expires: expires, ready: make(chan struct{})}
+		c.items[key] = e
+		c.mu.Unlock()
+
+		val, err := compute()
+
+		c.mu.Lock()
+		close(e.ready)
+		e.ready = nil
+		if err != nil {
+			delete(c.items, key)
+			c.mu.Unlock()
+			return "", err
+		}
+		e.value = val
+		e.expires = expires
+		c.mu.Unlock()
+		return val, nil
+	}
+}
+
+var scrapeCache = &scrapeDailyCache{}
+
+// nowFunc exists for deterministic tests.
+var nowFunc = time.Now
+
+func normalizeCacheKeyPart(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	// Collapse whitespace to maximize cache hits.
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func cacheLocation() *time.Location {
+	tz := strings.TrimSpace(os.Getenv("AUSTENDER_CACHE_TZ"))
+	if tz == "" {
+		tz = "Australia/Sydney"
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+func dayBucketAndExpiry(now time.Time) (bucket string, expires time.Time) {
+	loc := cacheLocation()
+	ln := now.In(loc)
+	y, m, d := ln.Date()
+	bucket = fmt.Sprintf("%04d-%02d-%02d", y, int(m), d)
+	// Expire at next local midnight.
+	expires = time.Date(y, m, d+1, 0, 0, 0, 0, loc)
+	return
+}
+
+func buildScrapeCacheKey(req collector.SearchRequest, dayBucket string) string {
+	company := normalizeCacheKeyPart(req.Company)
+	agency := normalizeCacheKeyPart(req.Agency)
+	keyword := normalizeCacheKeyPart(req.Keyword)
+	source := normalizeCacheKeyPart(req.Source)
+	dateType := normalizeCacheKeyPart(req.DateType)
+
+	start := ""
+	if !req.StartDate.IsZero() {
+		start = req.StartDate.UTC().Format(time.RFC3339)
+	}
+	end := ""
+	if !req.EndDate.IsZero() {
+		end = req.EndDate.UTC().Format(time.RFC3339)
+	}
+
+	return strings.Join([]string{
+		"day=" + dayBucket,
+		"company=" + company,
+		"agency=" + agency,
+		"keyword=" + keyword,
+		"source=" + source,
+		"dateType=" + dateType,
+		fmt.Sprintf("lookback=%d", req.LookbackPeriod),
+		"start=" + start,
+		"end=" + end,
+	}, "|")
+}
+
+// runScrapeCached adds a same-day in-memory cache on top of the collector cache.
+// It intentionally buckets results by the day of the API call (in AUSTENDER_CACHE_TZ)
+// to minimize repeated scraping for the same company within a day.
+var runScrapeCached = func(ctx context.Context, req collector.SearchRequest) (string, error) {
+	bucket, expires := dayBucketAndExpiry(nowFunc())
+	key := buildScrapeCacheKey(req, bucket)
+	return scrapeCache.getOrCompute(ctx, key, expires, func() (string, error) {
+		return runScrape(ctx, req)
+	})
+}
+
 func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
 	if r.Method == http.MethodOptions {
@@ -56,7 +195,7 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	start := time.Now()
+	requestStart := time.Now()
 	var req ScrapeRequest
 	decErr := json.NewDecoder(r.Body).Decode(&req)
 	if decErr != nil {
@@ -108,12 +247,12 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		company = req.CompanyName
 	}
 
-	start, err := parseRequestDate(req.StartDate)
+	startDate, err := parseRequestDate(req.StartDate)
 	if err != nil {
 		sendJSONError(w, fmt.Sprintf("invalid startDate: %v", err), http.StatusBadRequest)
 		return
 	}
-	end, err := parseRequestDate(req.EndDate)
+	endDate, err := parseRequestDate(req.EndDate)
 	if err != nil {
 		sendJSONError(w, fmt.Sprintf("invalid endDate: %v", err), http.StatusBadRequest)
 		return
@@ -129,15 +268,15 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		Company:        company,
 		Agency:         req.Agency,
 		Source:         req.Source,
-		StartDate:      start,
-		EndDate:        end,
+		StartDate:      startDate,
+		EndDate:        endDate,
 		DateType:       req.DateType,
 		LookbackPeriod: req.LookbackPeriod,
 	}
 
 	var total string
 	if useCache {
-		total, err = runScrape(r.Context(), searchReq)
+		total, err = runScrapeCached(r.Context(), searchReq)
 	} else {
 		total, err = collector.RunSearch(r.Context(), searchReq)
 	}
@@ -151,7 +290,7 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 
-	log.Printf("%s %s -> 200 in %s (keyword=%q company=%q agency=%q start=%q end=%q)", r.Method, r.URL.Path, time.Since(start), req.Keyword, company, req.Agency, req.StartDate, req.EndDate)
+	log.Printf("%s %s -> 200 in %s (keyword=%q company=%q agency=%q start=%q end=%q)", r.Method, r.URL.Path, time.Since(requestStart), req.Keyword, company, req.Agency, req.StartDate, req.EndDate)
 }
 
 func setCORSHeaders(w http.ResponseWriter) {

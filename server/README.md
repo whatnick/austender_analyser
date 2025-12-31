@@ -4,8 +4,7 @@ Go HTTP + Lambda entrypoint that fronts the collector search helpers and exposes
 
 ## Endpoints
 - `POST /api/scrape` – `{ "keyword": "KPMG" }` -> `{ "result": "$X.XX" }` using collector search helpers.
-- `POST /api/llm` – `{ "prompt": "How much was spent by Department of Defence?", "prefetch": true, "mcpConfig": { ... } }`.
-  - `prefetch` (default true) controls whether the server prefetches spend totals from the cached parquet/SQLite catalog and injects context.
+- `POST /api/llm` – `{ "prompt": "How much was spent by Department of Defence?", "mcpConfig": { ... } }`.
   - `mcpConfig` (optional) is forwarded so downstream agents can call tools defined in `mcp_server.go`.
 - `POST /api/mcp` – MCP tool surface for agents (see `mcp_server.go`).
 
@@ -18,6 +17,6 @@ Go HTTP + Lambda entrypoint that fronts the collector search helpers and exposes
 - Root `task test:all` covers this module.
 
 ## Notes
-- `llm_handler.go` handles prompt parsing and prefetch; toggle via `prefetch` flag from clients (the HTMX chat ties this to the MCP switch).
+- `llm_handler.go` handles prompt wiring and optional MCP config attachment.
 - `mcp_server.go` keeps typed tools in sync with collector helpers; avoid drift when changing request/response structs.
 - Lambda builds use `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` (`task server:build`).

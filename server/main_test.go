@@ -4,12 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	collector "github.com/whatnick/austender_analyser/collector/cmd"
 )
 
 func TestHandleLambdaRequest(t *testing.T) {
+	t.Setenv("AUSTENDER_CACHE_TZ", "UTC")
+	resetScrapeDailyCacheForTests()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return time.Date(2025, 12, 31, 10, 0, 0, 0, time.UTC) }
+	defer func() { nowFunc = oldNow }()
+
 	// stub runScrape
 	old := runScrape
 	runScrape = func(ctx context.Context, req collector.SearchRequest) (string, error) {

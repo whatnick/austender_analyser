@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	collector "github.com/whatnick/austender_analyser/collector/cmd"
@@ -18,10 +21,17 @@ type reqBody struct {
 	Company        string `json:"company,omitempty"`
 	CompanyName    string `json:"companyName,omitempty"`
 	Agency         string `json:"agency,omitempty"`
+	Source         string `json:"source,omitempty"`
 	StartDate      string `json:"startDate,omitempty"`
 	EndDate        string `json:"endDate,omitempty"`
 	DateType       string `json:"dateType,omitempty"`
 	LookbackPeriod int    `json:"lookbackPeriod,omitempty"`
+}
+
+func resetScrapeDailyCacheForTests() {
+	scrapeCache.mu.Lock()
+	defer scrapeCache.mu.Unlock()
+	scrapeCache.items = nil
 }
 
 func TestScrapeHandler_OK(t *testing.T) {
@@ -51,6 +61,82 @@ func TestScrapeHandler_OK(t *testing.T) {
 	}
 	if resp.Result != "$123.45" {
 		t.Fatalf("unexpected result: %s", resp.Result)
+	}
+}
+
+func TestScrapeHandler_SameDayCacheHit(t *testing.T) {
+	t.Setenv("AUSTENDER_CACHE_TZ", "UTC")
+	resetScrapeDailyCacheForTests()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return time.Date(2025, 12, 31, 10, 0, 0, 0, time.UTC) }
+	defer func() { nowFunc = oldNow }()
+
+	calls := 0
+	old := runScrape
+	runScrape = func(ctx context.Context, req collector.SearchRequest) (string, error) {
+		calls++
+		return "$9.99", nil
+	}
+	defer func() { runScrape = old }()
+
+	body, _ := json.Marshal(reqBody{Keyword: "KPMG", Company: "KPMG"})
+
+	// First call populates cache.
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest(http.MethodPost, "/api/scrape", bytes.NewReader(body))
+	scrapeHandler(w1, r1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w1.Code)
+	}
+
+	// Second call should hit cache and not invoke runScrape again.
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodPost, "/api/scrape", bytes.NewReader(body))
+	scrapeHandler(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w2.Code)
+	}
+
+	if calls != 1 {
+		t.Fatalf("expected 1 underlying scrape call, got %d", calls)
+	}
+}
+
+func TestScrapeHandler_SameDayCacheKeyIncludesSource(t *testing.T) {
+	t.Setenv("AUSTENDER_CACHE_TZ", "UTC")
+	resetScrapeDailyCacheForTests()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return time.Date(2025, 12, 31, 10, 0, 0, 0, time.UTC) }
+	defer func() { nowFunc = oldNow }()
+
+	calls := 0
+	old := runScrape
+	runScrape = func(ctx context.Context, req collector.SearchRequest) (string, error) {
+		calls++
+		return "$1.00", nil
+	}
+	defer func() { runScrape = old }()
+
+	// Same company, different source should be a cache miss.
+	first, _ := json.Marshal(reqBody{Keyword: "Test", Company: "Acme", Source: "austender"})
+	second, _ := json.Marshal(reqBody{Keyword: "Test", Company: "Acme", Source: "nsw"})
+
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest(http.MethodPost, "/api/scrape", bytes.NewReader(first))
+	scrapeHandler(w1, r1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w1.Code)
+	}
+
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodPost, "/api/scrape", bytes.NewReader(second))
+	scrapeHandler(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w2.Code)
+	}
+
+	if calls != 2 {
+		t.Fatalf("expected 2 underlying scrape calls, got %d", calls)
 	}
 }
 
@@ -156,14 +242,207 @@ func TestMCPStreamable_ListTools(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("invalid response: %v", err)
 	}
-	found := false
+	foundAggregate := false
+	foundIdentify := false
+	foundAgencies := false
+	foundCompanies := false
 	for _, tool := range body.Result.Tools {
 		if tool.Name == "aggregate_contracts" {
-			found = true
+			foundAggregate = true
+		}
+		if tool.Name == "identify_jurisdiction" {
+			foundIdentify = true
+		}
+		if tool.Name == "find_agencies" {
+			foundAgencies = true
+		}
+		if tool.Name == "find_companies" {
+			foundCompanies = true
 		}
 	}
-	if !found {
+	if !foundAggregate {
 		t.Fatalf("aggregate_contracts tool missing from list response")
+	}
+	if !foundIdentify {
+		t.Fatalf("identify_jurisdiction tool missing from list response")
+	}
+	if !foundAgencies {
+		t.Fatalf("find_agencies tool missing from list response")
+	}
+	if !foundCompanies {
+		t.Fatalf("find_companies tool missing from list response")
+	}
+}
+
+func writeTestCatalog(t *testing.T, cacheDir string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(cacheDir, "catalog.sqlite"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE parquet_files (
+			path TEXT PRIMARY KEY,
+			source TEXT NOT NULL,
+			fy TEXT NOT NULL,
+			agency_key TEXT NOT NULL,
+			agency_name TEXT NOT NULL,
+			company_key TEXT NOT NULL,
+			company_name TEXT NOT NULL,
+			row_count INTEGER NOT NULL,
+			created_at TEXT NOT NULL
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO parquet_files(path, source, fy, agency_key, agency_name, company_key, company_name, row_count, created_at)
+		VALUES
+		('p1', 'federal', '2024-25', 'department_of_defence', 'Department of Defence', 'acme', 'Acme Pty Ltd', 100, 'now'),
+		('p2', 'federal', '2024-25', 'ato', 'Australian Taxation Office', 'kpmg', 'KPMG', 50, 'now');
+	`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+}
+
+func TestMCPStreamable_IdentifyJurisdictionCall(t *testing.T) {
+	handler := buildMCPHTTPHandler()
+	sessionID := initializeTestMCPSession(t, handler)
+
+	resp := sendJSONRPCRequest(t, handler, sessionID, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      42,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "identify_jurisdiction",
+			"arguments": map[string]any{
+				"text": "Compare spend in Western Australia",
+			},
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Code)
+	}
+
+	var body struct {
+		Result struct {
+			Structured struct {
+				Source   string `json:"source"`
+				Evidence string `json:"evidence"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid response: %v", err)
+	}
+	if body.Result.Structured.Source != "wa" {
+		t.Fatalf("unexpected source: %+v", body.Result.Structured)
+	}
+	if body.Result.Structured.Evidence == "" {
+		t.Fatalf("expected evidence to be populated")
+	}
+}
+
+func TestMCPStreamable_FindAgenciesCall(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("AUSTENDER_CACHE_DIR", cacheDir)
+	writeTestCatalog(t, cacheDir)
+
+	handler := buildMCPHTTPHandler()
+	sessionID := initializeTestMCPSession(t, handler)
+
+	resp := sendJSONRPCRequest(t, handler, sessionID, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      43,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "find_agencies",
+			"arguments": map[string]any{
+				"source": "federal",
+				"query":  "defence",
+				"limit":  5,
+			},
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Code)
+	}
+
+	var body struct {
+		Result struct {
+			Structured struct {
+				CatalogAvailable bool `json:"catalogAvailable"`
+				Candidates       []struct {
+					Name string `json:"name"`
+				} `json:"candidates"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid response: %v", err)
+	}
+	if !body.Result.Structured.CatalogAvailable {
+		t.Fatalf("expected catalogAvailable=true")
+	}
+	if len(body.Result.Structured.Candidates) == 0 {
+		t.Fatalf("expected at least 1 candidate")
+	}
+	if body.Result.Structured.Candidates[0].Name != "Department of Defence" {
+		t.Fatalf("unexpected top candidate: %+v", body.Result.Structured.Candidates[0])
+	}
+}
+
+func TestMCPStreamable_FindCompaniesCall(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("AUSTENDER_CACHE_DIR", cacheDir)
+	writeTestCatalog(t, cacheDir)
+
+	handler := buildMCPHTTPHandler()
+	sessionID := initializeTestMCPSession(t, handler)
+
+	resp := sendJSONRPCRequest(t, handler, sessionID, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      44,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "find_companies",
+			"arguments": map[string]any{
+				"source": "federal",
+				"query":  "kpmg",
+				"limit":  5,
+			},
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Code)
+	}
+
+	var body struct {
+		Result struct {
+			Structured struct {
+				CatalogAvailable bool `json:"catalogAvailable"`
+				Candidates       []struct {
+					Name string `json:"name"`
+				} `json:"candidates"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid response: %v", err)
+	}
+	if !body.Result.Structured.CatalogAvailable {
+		t.Fatalf("expected catalogAvailable=true")
+	}
+	if len(body.Result.Structured.Candidates) == 0 {
+		t.Fatalf("expected at least 1 candidate")
+	}
+	if body.Result.Structured.Candidates[0].Name != "KPMG" {
+		t.Fatalf("unexpected top candidate: %+v", body.Result.Structured.Candidates[0])
 	}
 }
 

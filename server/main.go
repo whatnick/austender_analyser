@@ -73,7 +73,7 @@ func HandleLambdaRequest(ctx context.Context, req events.APIGatewayProxyRequest)
 	}
 
 	// Sensible defaults: allow empty filters
-	total, err := runScrape(ctx, collector.SearchRequest{
+	total, err := runScrapeCached(ctx, collector.SearchRequest{
 		Keyword:   keyword,
 		Company:   company,
 		Agency:    agency,

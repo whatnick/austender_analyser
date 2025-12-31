@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +19,11 @@ import (
 // newLLMClient builds the LLM used by the handler. Overridden in integration tests.
 var newLLMClient = func(modelName string) (llms.Model, error) {
 	return openai.New(openai.WithModel(modelName))
+}
+
+// generateFromPrompt is overridable in tests.
+var generateFromPrompt = func(ctx context.Context, client llms.Model, prompt string) (string, error) {
+	return llms.GenerateFromSinglePrompt(ctx, client, prompt)
 }
 
 // llmHandler accepts plain-text prompts and optional MCP server config to give the LLM
@@ -45,10 +50,6 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	if req.UseCache != nil {
 		useCache = *req.UseCache
 	}
-	prefetchAllowed := true
-	if req.Prefetch != nil {
-		prefetchAllowed = *req.Prefetch
-	}
 	if len(req.MCPConfig) == 0 {
 		req.MCPConfig = defaultMCPConfig()
 	}
@@ -66,27 +67,6 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	mcpContext := strings.TrimSpace(string(req.MCPConfig))
 	basePrompt := req.Prompt
 
-	source := strings.TrimSpace(req.Source)
-	if source == "" {
-		source = parseSourceFromPrompt(req.Prompt)
-	}
-
-	var prefetchedContext string
-	// If allowed and the prompt looks like a spend query, prefetch using the collector cache and inject context.
-	if prefetchAllowed {
-		if pre, err := maybePrefetchComparison(r.Context(), req.Prompt, source, lookback, useCache); err == nil && pre != "" {
-			prefetchedContext = pre
-			basePrompt = pre + "\n\n" + basePrompt
-		} else if pre, err := maybePrefetchSpend(r.Context(), req.Prompt, source, lookback, useCache); err == nil && pre != "" {
-			prefetchedContext = pre
-			basePrompt = pre + "\n\n" + basePrompt
-		}
-	}
-	fullPrompt := basePrompt
-	if mcpContext != "" {
-		fullPrompt = fmt.Sprintf("You can call MCP servers described by this JSON config (pass along to your agent tooling): %s\n\n%s", mcpContext, basePrompt)
-	}
-
 	client, err := newLLMClient(modelName)
 	if err != nil {
 		msg := fmt.Sprintf("llm init failed: %v", err)
@@ -102,22 +82,37 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
-	resp, err := llms.GenerateFromSinglePrompt(ctx, client, fullPrompt)
-	if err != nil {
-		sendJSONError(w, fmt.Sprintf("llm error: %v", err), http.StatusInternalServerError)
-		return
+	// Agent mode: always-on tool-calling loop that executes local MCP-equivalent tools.
+	agent := true
+
+	resp := ""
+	agentErr := error(nil)
+	if agent {
+		resp, agentErr = runLLMAgent(ctx, client, basePrompt, strings.TrimSpace(req.Source), lookback, useCache, mcpContext)
+	}
+	if !agent || agentErr != nil {
+		fullPrompt := basePrompt
+		if mcpContext != "" {
+			// Keep backwards compatibility: include MCP config as plain context.
+			fullPrompt = fmt.Sprintf("MCP config (for tool-aware agents): %s\n\n%s", mcpContext, basePrompt)
+		}
+		resp, err = generateFromPrompt(ctx, client, fullPrompt)
+		if err != nil {
+			sendJSONError(w, fmt.Sprintf("llm error: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(LLMResponse{Result: resp, Context: prefetchedContext})
+	json.NewEncoder(w).Encode(LLMResponse{Result: resp})
 }
 
 type LLMRequest struct {
 	Prompt         string          `json:"prompt"`
 	Model          string          `json:"model,omitempty"`
 	Source         string          `json:"source,omitempty"`
+	Agent          *bool           `json:"agent,omitempty"`
 	MCPConfig      json.RawMessage `json:"mcpConfig,omitempty"`
-	Prefetch       *bool           `json:"prefetch,omitempty"`
 	LookbackPeriod int             `json:"lookbackPeriod,omitempty"`
 	UseCache       *bool           `json:"useCache,omitempty"`
 }
@@ -125,230 +120,6 @@ type LLMRequest struct {
 type LLMResponse struct {
 	Result  string `json:"result"`
 	Context string `json:"context,omitempty"`
-}
-
-// Patterns:
-// 1) "how much did {agency} spend on {company}"
-// 2) "how much was spent on {company} by {agency}" (agency optional)
-// 3) "how much was spent by {agency}" (agency only)
-// 4) "how much did {agency} spend" (agency only)
-var (
-	spendAgencyRe     = regexp.MustCompile(`(?i)how\s+much\s+did\s+(.+?)\s+spend\s+on\s+([\w\s&\-\.]+)`)            // agency, company
-	spendOnRe         = regexp.MustCompile(`(?i)how\s+much\s+was\s+spent\s+on\s+([\w\s&\-\.]+)(?:\s+by\s+(.+?))?$`) // company, optional agency
-	spendByAgencyRe   = regexp.MustCompile(`(?i)how\s+much\s+was\s+spent\s+by\s+(.+?)\??$`)                         // agency only
-	spendAgencyOnlyRe = regexp.MustCompile(`(?i)how\s+much\s+did\s+(.+?)\s+spend\??$`)                              // agency only
-)
-
-// maybePrefetchSpend tries to answer spend questions by querying the collector.
-func maybePrefetchSpend(ctx context.Context, prompt string, source string, lookbackPeriod int, useCache bool) (string, error) {
-	if lookbackPeriod <= 0 {
-		lookbackPeriod = 20
-	}
-	company, agency := parseSpendQuery(prompt)
-	if company == "" && agency == "" {
-		return "", nil
-	}
-	req := collector.SearchRequest{
-		Company:        company,
-		Agency:         agency,
-		Source:         source,
-		LookbackPeriod: lookbackPeriod,
-	}
-	var res string
-	var err error
-	if useCache {
-		res, _, err = collector.RunSearchWithCache(ctx, req)
-	} else {
-		res, err = collector.RunSearch(ctx, req)
-	}
-	if err != nil {
-		return "", err
-	}
-	parts := []string{fmt.Sprintf("Prefetched spend over the last %d years: %s", lookbackPeriod, res)}
-	if source != "" {
-		parts = append(parts, fmt.Sprintf("source=%s", source))
-	}
-	if company != "" {
-		parts = append(parts, fmt.Sprintf("company=%s", company))
-	}
-	if agency != "" {
-		parts = append(parts, fmt.Sprintf("agency=%s", agency))
-	}
-	return strings.Join(parts, " | "), nil
-}
-
-// maybePrefetchComparison handles prompts asking to compare spend between two agencies or two companies.
-func maybePrefetchComparison(ctx context.Context, prompt string, source string, lookbackPeriod int, useCache bool) (string, error) {
-	if lookbackPeriod <= 0 {
-		lookbackPeriod = 20
-	}
-	leftAgency, rightAgency := parseCompareAgencies(prompt)
-	leftCo, rightCo := parseCompareCompanies(prompt)
-
-	switch {
-	case leftAgency != "" && rightAgency != "":
-		return prefetchTwo(ctx, collector.SearchRequest{Agency: leftAgency, Source: source, LookbackPeriod: lookbackPeriod}, collector.SearchRequest{Agency: rightAgency, Source: source, LookbackPeriod: lookbackPeriod}, useCache)
-	case leftCo != "" && rightCo != "":
-		return prefetchTwo(ctx, collector.SearchRequest{Company: leftCo, Source: source, LookbackPeriod: lookbackPeriod}, collector.SearchRequest{Company: rightCo, Source: source, LookbackPeriod: lookbackPeriod}, useCache)
-	default:
-		return "", nil
-	}
-}
-
-func prefetchTwo(ctx context.Context, leftReq, rightReq collector.SearchRequest, useCache bool) (string, error) {
-	lookback := leftReq.LookbackPeriod
-	if lookback <= 0 {
-		lookback = 20
-	}
-	leftRes, err := runSearchMaybeCache(ctx, leftReq, useCache)
-	if err != nil {
-		return "", err
-	}
-	rightRes, err := runSearchMaybeCache(ctx, rightReq, useCache)
-	if err != nil {
-		return "", err
-	}
-	leftLabel := labelForReq(leftReq)
-	rightLabel := labelForReq(rightReq)
-	return fmt.Sprintf("Prefetched comparison over the last %d years: %s=%s | %s=%s", lookback, leftLabel, leftRes, rightLabel, rightRes), nil
-}
-
-func runSearchMaybeCache(ctx context.Context, req collector.SearchRequest, useCache bool) (string, error) {
-	if useCache {
-		res, _, err := collector.RunSearchWithCache(ctx, req)
-		return res, err
-	}
-	return collector.RunSearch(ctx, req)
-}
-
-func labelForReq(r collector.SearchRequest) string {
-	switch {
-	case r.Agency != "":
-		return r.Agency
-	case r.Company != "":
-		return r.Company
-	default:
-		return ""
-	}
-}
-
-// parseSpendQuery extracts company and agency from common spend prompts.
-func parseSpendQuery(prompt string) (company string, agency string) {
-	p := strings.TrimSpace(prompt)
-	if p == "" {
-		return
-	}
-	if m := spendAgencyRe.FindStringSubmatch(p); len(m) == 3 {
-		agency = normalizeEntity(m[1])
-		company = normalizeEntity(m[2])
-		return
-	}
-	if m := spendOnRe.FindStringSubmatch(p); len(m) >= 2 {
-		company = normalizeEntity(m[1])
-		if len(m) >= 3 {
-			agency = normalizeEntity(m[2])
-		}
-		return
-	}
-	if m := spendByAgencyRe.FindStringSubmatch(p); len(m) == 2 {
-		agency = normalizeEntity(m[1])
-		return
-	}
-	if m := spendAgencyOnlyRe.FindStringSubmatch(p); len(m) == 2 {
-		agency = normalizeEntity(m[1])
-	}
-	return
-}
-
-func normalizeEntity(v string) string {
-	v = strings.TrimSpace(v)
-	v = strings.TrimSuffix(v, "?")
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return ""
-	}
-	return strings.Title(strings.ToLower(v))
-}
-
-// parseCompareAgencies tries to extract two agencies from comparison phrasing without regex.
-// Example: "Compare how much was spent by Home Affairs with how much was spent by Department of Defence".
-func parseCompareAgencies(prompt string) (string, string) {
-	p := strings.TrimSpace(prompt)
-	if p == "" {
-		return "", ""
-	}
-	lower := strings.ToLower(p)
-	if !strings.Contains(lower, "compare") || !strings.Contains(lower, "with") || !strings.Contains(lower, "spent by") {
-		return "", ""
-	}
-	parts := strings.SplitN(p, " with ", 2)
-	if len(parts) != 2 {
-		return "", ""
-	}
-	left := extractAfter(parts[0], "spent by")
-	right := extractAfter(parts[1], "spent by")
-	return normalizeEntity(left), normalizeEntity(right)
-}
-
-// parseCompareCompanies tries to extract two companies from comparison phrasing.
-// Example: "Compare how much was spent on KPMG with how much was spent on Deloitte".
-func parseCompareCompanies(prompt string) (string, string) {
-	p := strings.TrimSpace(prompt)
-	if p == "" {
-		return "", ""
-	}
-	lower := strings.ToLower(p)
-	if !strings.Contains(lower, "compare") || !strings.Contains(lower, "with") || !strings.Contains(lower, "spent on") {
-		return "", ""
-	}
-	parts := strings.SplitN(p, " with ", 2)
-	if len(parts) != 2 {
-		return "", ""
-	}
-	left := extractAfter(parts[0], "spent on")
-	right := extractAfter(parts[1], "spent on")
-	return normalizeEntity(left), normalizeEntity(right)
-}
-
-// extractAfter returns the substring after the last occurrence of marker.
-func extractAfter(s, marker string) string {
-	lower := strings.ToLower(s)
-	idx := strings.LastIndex(lower, marker)
-	if idx == -1 {
-		return ""
-	}
-	return strings.TrimSpace(s[idx+len(marker):])
-}
-
-// parseSourceFromPrompt looks for keywords like "federal", "vic", "nsw", "sa", "wa" in the prompt.
-func parseSourceFromPrompt(prompt string) string {
-	p := strings.ToLower(prompt)
-
-	// Check special cases first (longer names)
-	if strings.Contains(p, "victoria") {
-		return "vic"
-	}
-	if strings.Contains(p, "new south wales") {
-		return "nsw"
-	}
-	if strings.Contains(p, "south australia") {
-		return "sa"
-	}
-	if strings.Contains(p, "western australia") {
-		return "wa"
-	}
-
-	// Check for exact matches with word boundaries for short codes
-	sources := collector.AvailableSources()
-	for _, s := range sources {
-		// Simple word boundary check
-		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(s) + `\b`)
-		if re.MatchString(p) {
-			return s
-		}
-	}
-
-	return ""
 }
 
 // Helper to detect available MCP config path via env for defaults.
@@ -362,4 +133,300 @@ func defaultMCPConfig() json.RawMessage {
 		return nil
 	}
 	return b
+}
+
+type agentDirective struct {
+	Tool      string         `json:"tool,omitempty"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	Final     string         `json:"final,omitempty"`
+}
+
+func runLLMAgent(ctx context.Context, client llms.Model, userPrompt, sourceHint string, lookback int, useCache bool, mcpContext string) (string, error) {
+	state := map[string]any{}
+
+	source := strings.TrimSpace(sourceHint)
+	if source == "" {
+		source = collector.DetectSourceFromText(userPrompt)
+	}
+	source = collector.CanonicalSourceID(source)
+	if strings.TrimSpace(sourceHint) == "" {
+		// If we didn't get an explicit hint and no match, keep it empty.
+		if collector.DetectSourceFromText(userPrompt) == "" {
+			source = ""
+		}
+	}
+	state["source"] = source
+
+	maxSteps := 8
+	transcript := strings.Builder{}
+	transcript.WriteString("User prompt:\n")
+	transcript.WriteString(userPrompt)
+	transcript.WriteString("\n\n")
+	if mcpContext != "" {
+		transcript.WriteString("MCP config (informational; tools are executed locally by the server):\n")
+		transcript.WriteString(mcpContext)
+		transcript.WriteString("\n\n")
+	}
+
+	toolsDescription := agentToolsDescription(lookback)
+
+	for step := 0; step < maxSteps; step++ {
+		prompt := fmt.Sprintf("%s\n\nCurrent state (JSON): %s\n\nConversation so far:\n%s\n\nReturn ONLY a JSON object for the next action. Either {\"tool\":\"...\",\"arguments\":{...}} or {\"final\":\"...\"}. No markdown.", toolsDescription, mustJSON(state), transcript.String())
+		raw, err := generateFromPrompt(ctx, client, prompt)
+		if err != nil {
+			return "", err
+		}
+		dir, parseErr := parseAgentDirective(raw)
+		if parseErr != nil {
+			// Give the model one corrective attempt.
+			transcript.WriteString("Agent parse error: ")
+			transcript.WriteString(parseErr.Error())
+			transcript.WriteString("\n")
+			continue
+		}
+		if strings.TrimSpace(dir.Final) != "" {
+			return strings.TrimSpace(dir.Final), nil
+		}
+		tool := strings.TrimSpace(dir.Tool)
+		if tool == "" {
+			transcript.WriteString("Agent error: missing tool name\n")
+			continue
+		}
+		out, err := executeAgentTool(ctx, tool, dir.Arguments, lookback, useCache, state)
+		if err != nil {
+			transcript.WriteString(fmt.Sprintf("Tool %s error: %v\n", tool, err))
+			continue
+		}
+		transcript.WriteString("Tool call: ")
+		transcript.WriteString(tool)
+		transcript.WriteString("\nArguments: ")
+		transcript.WriteString(mustJSON(dir.Arguments))
+		transcript.WriteString("\nResult: ")
+		transcript.WriteString(mustJSON(out))
+		transcript.WriteString("\n\n")
+	}
+
+	return "", fmt.Errorf("agent exceeded max steps")
+}
+
+func agentToolsDescription(defaultLookback int) string {
+	return fmt.Sprintf(strings.TrimSpace(`You are a tool-using agent for Australian government contract spend analysis.
+
+Available tools:
+
+1) identify_jurisdiction
+  - arguments: {"text": string}
+  - returns: {"source": string, "evidence": string}
+  - source is one of: federal|nsw|vic|sa|wa (or empty)
+
+2) find_companies
+  - arguments: {"source": string (optional), "query": string (optional), "limit": int (optional)}
+  - returns: {"catalogAvailable": bool, "evidence": string, "candidates": [{"source": string, "name": string, "key": string, "rows": number}]}
+
+3) find_agencies
+  - arguments: {"source": string (optional), "query": string (optional), "limit": int (optional)}
+  - returns: same shape as find_companies
+
+4) aggregate_contracts
+  - arguments: {"keyword": string, "company": string (optional), "agency": string (optional), "source": string (optional), "startDate": string (optional), "endDate": string (optional), "dateType": string (optional), "lookbackPeriod": int (optional)}
+  - returns: {"total": string, "source": string}
+
+Rules:
+- Always use JSON only.
+- Prefer calling identify_jurisdiction first when source is not clear.
+- Use find_companies/find_agencies to resolve ambiguous names before aggregating.
+- When calling aggregate_contracts, use lookbackPeriod default %d if not specified.
+`), defaultLookback)
+}
+
+func executeAgentTool(ctx context.Context, name string, args map[string]any, defaultLookback int, useCache bool, state map[string]any) (map[string]any, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+
+	getString := func(key string) string {
+		v, ok := args[key]
+		if !ok || v == nil {
+			return ""
+		}
+		s, ok := v.(string)
+		if ok {
+			return strings.TrimSpace(s)
+		}
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
+	getInt := func(key string, fallback int) int {
+		v, ok := args[key]
+		if !ok || v == nil {
+			return fallback
+		}
+		switch t := v.(type) {
+		case float64:
+			return int(t)
+		case int:
+			return t
+		case string:
+			parsed, err := strconv.Atoi(strings.TrimSpace(t))
+			if err == nil {
+				return parsed
+			}
+		}
+		return fallback
+	}
+
+	// Allow tools to default to previously detected source.
+	stateSource, _ := state["source"].(string)
+	defaultSource := strings.TrimSpace(stateSource)
+
+	switch name {
+	case "identify_jurisdiction":
+		text := getString("text")
+		if text == "" {
+			return nil, fmt.Errorf("text is required")
+		}
+		src, evidence := collector.DetectSourceFromTextWithEvidence(text)
+		if src != "" {
+			state["source"] = src
+		}
+		return map[string]any{"source": src, "evidence": evidence}, nil
+	case "find_companies":
+		src := getString("source")
+		if src == "" {
+			src = defaultSource
+		}
+		res, err := collector.FindCompaniesFromCatalog(ctx, collector.EntityLookupOptions{Source: src, Query: getString("query"), Limit: getInt("limit", 10)})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"catalogAvailable": res.CatalogAvailable, "evidence": res.Evidence, "candidates": res.Candidates}, nil
+	case "find_agencies":
+		src := getString("source")
+		if src == "" {
+			src = defaultSource
+		}
+		res, err := collector.FindAgenciesFromCatalog(ctx, collector.EntityLookupOptions{Source: src, Query: getString("query"), Limit: getInt("limit", 10)})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"catalogAvailable": res.CatalogAvailable, "evidence": res.Evidence, "candidates": res.Candidates}, nil
+	case "aggregate_contracts":
+		keyword := getString("keyword")
+		if keyword == "" {
+			return nil, fmt.Errorf("keyword is required")
+		}
+		src := getString("source")
+		if src == "" {
+			src = defaultSource
+		}
+		src = collector.CanonicalSourceID(src)
+		if strings.TrimSpace(getString("source")) == "" {
+			// If omitted and we had no detected value, allow empty to mean "auto" for collector.
+			if defaultSource == "" {
+				src = ""
+			}
+		}
+
+		start, err := parseRequestDate(getString("startDate"))
+		if err != nil {
+			return nil, fmt.Errorf("invalid startDate: %w", err)
+		}
+		end, err := parseRequestDate(getString("endDate"))
+		if err != nil {
+			return nil, fmt.Errorf("invalid endDate: %w", err)
+		}
+
+		lb := getInt("lookbackPeriod", defaultLookback)
+		if lb <= 0 {
+			lb = defaultLookback
+		}
+
+		search := collector.SearchRequest{
+			Keyword:        keyword,
+			Company:        getString("company"),
+			Agency:         getString("agency"),
+			Source:         src,
+			StartDate:      start,
+			EndDate:        end,
+			DateType:       getString("dateType"),
+			LookbackPeriod: lb,
+		}
+
+		var total string
+		if useCache {
+			total, err = runScrapeCached(ctx, search)
+		} else {
+			total, err = runScrape(ctx, search)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"total": total, "source": src}, nil
+	default:
+		return nil, fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+func parseAgentDirective(modelText string) (agentDirective, error) {
+	trimmed := strings.TrimSpace(modelText)
+	if trimmed == "" {
+		return agentDirective{}, fmt.Errorf("empty model response")
+	}
+	obj, err := extractFirstJSONObject(trimmed)
+	if err != nil {
+		return agentDirective{}, err
+	}
+	var dir agentDirective
+	if err := json.Unmarshal([]byte(obj), &dir); err != nil {
+		return agentDirective{}, err
+	}
+	return dir, nil
+}
+
+func extractFirstJSONObject(s string) (string, error) {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return "", fmt.Errorf("no json object found")
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			continue
+		}
+		if c == '{' {
+			depth++
+		}
+		if c == '}' {
+			depth--
+			if depth == 0 {
+				return s[start : i+1], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("unterminated json object")
+}
+
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }

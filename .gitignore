@@ -1,2 +1,30 @@
 .vscode/
 dist/
+
+# Local cache / state
+.cache/
+
+# Go build + test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Coverage outputs
+*.out
+coverage.out
+**/coverage.out
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.log
+.idea/
+
+# Node (not used by default, but ignore if present)
+node_modules/
