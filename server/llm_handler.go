@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/ollama"
 	"github.com/tmc/langchaingo/llms/openai"
 
 	collector "github.com/whatnick/austender_analyser/collector/cmd"
@@ -18,6 +19,16 @@ import (
 
 // newLLMClient builds the LLM used by the handler. Overridden in integration tests.
 var newLLMClient = func(modelName string) (llms.Model, error) {
+	if isOllamaConfigured() {
+		opts := []ollama.Option{ollama.WithModel(modelName)}
+		if base := strings.TrimSpace(os.Getenv("OLLAMA_HOST")); base != "" {
+			opts = append(opts, ollama.WithServerURL(normalizeOllamaURL(base)))
+		}
+		if system := strings.TrimSpace(os.Getenv("OLLAMA_SYSTEM_PROMPT")); system != "" {
+			opts = append(opts, ollama.WithSystemPrompt(system))
+		}
+		return ollama.New(opts...)
+	}
 	return openai.New(openai.WithModel(modelName))
 }
 
@@ -58,10 +69,10 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modelName := strings.TrimSpace(req.Model)
-	if modelName == "" {
-		// Default to a widely available model; callers can override.
-		modelName = "gpt-4o-mini"
+	modelName, err := resolveModelName(strings.TrimSpace(req.Model))
+	if err != nil {
+		sendJSONError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	mcpContext := strings.TrimSpace(string(req.MCPConfig))
@@ -72,6 +83,9 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		msg := fmt.Sprintf("llm init failed: %v", err)
 		if strings.Contains(msg, "OPENAI_API_KEY") || strings.Contains(msg, "no API key") {
 			msg = "LLM initialization failed: OPENAI_API_KEY is not set in the environment. Please set it to use the chat feature."
+		}
+		if strings.Contains(msg, "OLLAMA_HOST") {
+			msg = "LLM initialization failed: OLLAMA_HOST is not reachable. Ensure the Ollama server is running and the host is correct."
 		}
 		sendJSONError(w, msg, http.StatusInternalServerError)
 		return

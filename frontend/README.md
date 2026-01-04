@@ -6,6 +6,7 @@ Static HTMX chat UI that talks to `/api/llm` and demonstrates MCP tool wiring.
 - Open `index.html` directly or run `task run:frontend` from repo root (assumes API on `http://localhost:8080`).
 - Ask plain-text spend questions in the chat box.
 - Toggle **Enable MCP backend** to send the MCP config from `config.local.js`.
+- The page auto-detects `/api/llm/models` on load (with retries) and shows the Ollama model picker when `OLLAMA_HOST` is configured on the server. The status banner reflects the detected backend/host.
 - Responses render markdown + math via markdown-it + markdown-it-mathjax3 (MathJax v3; supports `$...$`, `$$...$$`, `\[...\]`) and are sanitized with DOMPurify. If libraries are not ready yet, messages show plain text and are re-rendered once the renderer initializes. Scripts are deferred and the chat logic waits for DOMContentLoaded. Context is shown when the server could answer from cache.
 
 ## Configuration

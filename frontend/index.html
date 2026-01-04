@@ -50,6 +50,8 @@
                 <label class="form-check-label" for="toggle-cache">Use ducklake cache</label>
             </div>
 
+            <div class="small text-muted mb-3" id="backend-info">LLM backend: detecting…</div>
+
             <div class="card chat-card mb-3">
                 <div class="card-body">
                     <div id="chat-log" class="chat-log" aria-live="polite"></div>
@@ -82,6 +84,12 @@
                                     <label class="form-check-label" for="source-auto">Auto-detect</label>
                                 </div>
                             </div>
+                        </div>
+
+                        <div class="mb-3 d-none" id="model-picker">
+                            <label class="form-label" for="model-select">Model</label>
+                            <select class="form-select" id="model-select" name="model"></select>
+                            <div class="form-text" id="model-provider"></div>
                         </div>
 
                         <label for="prompt" class="form-label">Your question</label>
@@ -122,6 +130,15 @@
             var toggleCache = document.getElementById('toggle-cache');
             var lookbackInput = document.getElementById('lookback');
             var lookbackValueEl = document.getElementById('lookback-value');
+            var modelPicker = document.getElementById('model-picker');
+            var modelSelect = document.getElementById('model-select');
+            var modelProvider = document.getElementById('model-provider');
+            var backendInfo = document.getElementById('backend-info');
+            var modelsLoaded = false;
+            var defaultModel = null;
+            var MAX_MODEL_ATTEMPTS = 6;
+            var MODEL_RETRY_DELAY_MS = 1000;
+            if (backendInfo) backendInfo.textContent = 'LLM backend: detecting…';
 
             function updateLookbackLabel(val) {
                 lookbackValueEl.textContent = val;
@@ -130,6 +147,86 @@
                 updateLookbackLabel(this.value);
             });
             updateLookbackLabel(lookbackInput.value);
+
+            async function loadModels(attempt) {
+                if (!modelPicker || !modelSelect) return;
+                if (modelsLoaded) return;
+                attempt = attempt || 0;
+                try {
+                    var res = await fetch(apiBase.replace(/\/$/, '') + '/api/llm/models');
+                    if (!res.ok) throw new Error('status ' + res.status);
+                    var data = await res.json();
+                    var backend = (data && data.backend) || 'unknown';
+                    defaultModel = (data && data.defaultModel) ? (data.defaultModel || null) : null;
+                    if (backendInfo) {
+                        var label = backend.charAt(0).toUpperCase() + backend.slice(1);
+                        var endpointNote = (data && data.endpoint) ? ' (' + data.endpoint + ')' : '';
+                        backendInfo.textContent = 'LLM backend: ' + label + endpointNote;
+                    }
+                    if (backend !== 'ollama') {
+                        if (modelPicker) modelPicker.classList.add('d-none');
+                        modelsLoaded = true;
+                        return;
+                    }
+                    if (!Array.isArray(data.models)) {
+                        throw new Error('invalid models payload');
+                    }
+                    modelSelect.innerHTML = '';
+                    var defaultSet = false;
+                    data.models.forEach(function(model) {
+                        if (!model || !model.name) return;
+                        var opt = document.createElement('option');
+                        opt.value = model.name;
+                        opt.textContent = model.display || model.name;
+                        if (!defaultSet && model.default) {
+                            opt.selected = true;
+                            defaultSet = true;
+                        }
+                        modelSelect.appendChild(opt);
+                    });
+                    if (!defaultSet && data.defaultModel) {
+                        for (var i = 0; i < modelSelect.options.length; i++) {
+                            if (modelSelect.options[i].value === data.defaultModel) {
+                                modelSelect.options[i].selected = true;
+                                defaultSet = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!defaultSet && modelSelect.options.length > 0) {
+                        modelSelect.options[0].selected = true;
+                    }
+                    if (data.models.length === 0) {
+                        var opt = document.createElement('option');
+                        opt.value = '';
+                        opt.textContent = 'No models installed';
+                        modelSelect.appendChild(opt);
+                        modelSelect.disabled = true;
+                        if (modelProvider) {
+                            var hostHint = (data && data.endpoint) ? data.endpoint : 'configured host';
+                            modelProvider.textContent = 'Ollama detected (' + hostHint + ') but no models were found. Run `ollama pull <model>` and refresh.';
+                        }
+                    } else {
+                        modelSelect.disabled = false;
+                        if (modelProvider) {
+                            var hostText = (data && data.endpoint) ? data.endpoint : 'configured host';
+                            modelProvider.textContent = 'Ollama host: ' + hostText;
+                        }
+                    }
+                    modelPicker.classList.remove('d-none');
+                    modelsLoaded = true;
+                } catch (err) {
+                    console.warn('Failed to load LLM models', err);
+                    if (backendInfo) {
+                        backendInfo.textContent = 'LLM backend: detecting… (retry ' + Math.min(attempt + 1, MAX_MODEL_ATTEMPTS - 1) + ')';
+                    }
+                    if (attempt + 1 < MAX_MODEL_ATTEMPTS) {
+                        setTimeout(function() { loadModels(attempt + 1); }, MODEL_RETRY_DELAY_MS);
+                    } else {
+                        if (backendInfo) backendInfo.textContent = 'LLM backend: unavailable (see console)';
+                    }
+                }
+            }
 
             // Rich renderer: markdown-it + mathjax3 + DOMPurify with re-render once deps load
             var md;
@@ -215,6 +312,11 @@
                     useCache: !!toggleCache.checked,
                     agent: true
                 };
+                if (modelPicker && !modelPicker.classList.contains('d-none') && modelSelect) {
+                    payload.model = (modelSelect.value || '').trim();
+                } else if (defaultModel) {
+                    payload.model = defaultModel;
+                }
 
                 statusEl.textContent = 'Sending...';
                 sendBtn.disabled = true;
@@ -246,6 +348,8 @@
                 promptEl.value = '';
                 sendPrompt(prompt);
             });
+
+            loadModels(0);
         });
     </script>
 </body>

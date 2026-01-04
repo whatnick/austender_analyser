@@ -297,7 +297,7 @@ func setCORSHeaders(w http.ResponseWriter) {
 	// Basic CORS headers for browser requests (including file:// origins)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id, Mcp-Protocol-Version")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version")
 }
 
 func proxyOCDSRequest(ctx context.Context, params ocdsProxyParams, start, end time.Time) (json.RawMessage, error) {
@@ -358,6 +358,7 @@ func RegisterHandlers() {
 	http.Handle("/api/mcp", mcpHandler)
 	http.Handle("/api/mcp/", mcpHandler)
 	http.HandleFunc("/api/llm", llmHandler)
+	http.HandleFunc("/api/llm/models", llmModelsHandler)
 }
 
 func sendJSONError(w http.ResponseWriter, message string, code int) {
