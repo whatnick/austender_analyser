@@ -45,6 +45,9 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+// CLI wiring depends on Cobra runtime; skip coverage.
+//
+//go:nocover
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)

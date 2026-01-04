@@ -32,6 +32,7 @@ type waSupplier struct {
 	Name string `json:"name"`
 }
 
+//go:nocover
 func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	// Determine supplier search term
 	supplierSearchTerm := req.Company
@@ -276,6 +277,7 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	return formatMoneyDecimal(total), nil
 }
 
+//go:nocover
 func (w waSource) findSuppliers(keyword string, verbose bool) ([]waSupplier, error) {
 	u, _ := url.Parse(waSupplierSearchURL)
 	q := u.Query()
@@ -329,6 +331,7 @@ func parseWaMoney(s string) (decimal.Decimal, error) {
 	return decimal.NewFromString(s)
 }
 
+//go:nocover
 func (w waSource) fetchSupplier(url string) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)

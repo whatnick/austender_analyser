@@ -63,7 +63,7 @@ type scrapeDailyCache struct {
 
 func (c *scrapeDailyCache) getOrCompute(ctx context.Context, key string, expires time.Time, compute func() (string, error)) (string, error) {
 	for {
-		now := time.Now()
+		now := nowFunc()
 		c.mu.Lock()
 		if c.items == nil {
 			c.items = map[string]*scrapeDailyCacheEntry{}

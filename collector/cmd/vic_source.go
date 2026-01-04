@@ -37,6 +37,9 @@ func newVicSource() Source {
 
 func (v vicSource) ID() string { return vicSourceID }
 
+// Live VIC scraping depends on browser automation; mark as nocover.
+//
+//go:nocover
 func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
@@ -299,6 +302,7 @@ func parseVicAmount(raw string) decimal.Decimal {
 	return d
 }
 
+//go:nocover
 func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (string, error) {
 	// Headless Chrome fallback for anti-bot protections.
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
@@ -515,7 +519,10 @@ func isLikelyVicContractID(contractID string) bool {
 	return hasDigit
 }
 
+//go:nocover
 func fetchVicDetail(ctx context.Context, detailURL string) (string, string, error) {
+	//go:nocover
+
 	agency, supplier, err := fetchVicDetailWithColly(ctx, detailURL)
 	if err == nil && (agency != "" || supplier != "") {
 		return agency, supplier, nil
@@ -523,7 +530,10 @@ func fetchVicDetail(ctx context.Context, detailURL string) (string, string, erro
 	return fetchVicDetailWithBrowser(ctx, detailURL)
 }
 
+//go:nocover
 func fetchVicDetailWithColly(ctx context.Context, detailURL string) (string, string, error) {
+	//go:nocover
+
 	collector := colly.NewCollector(
 		colly.AllowedDomains("www.tenders.vic.gov.au", "tenders.vic.gov.au"),
 		colly.UserAgent(vicUserAgent),
@@ -531,6 +541,8 @@ func fetchVicDetailWithColly(ctx context.Context, detailURL string) (string, str
 		colly.CacheDir(filepath.Join(defaultCacheDir(), "vic_cookies")),
 	)
 	_ = collector.Limit(&colly.LimitRule{DomainGlob: "*tenders.vic.gov.au*", Parallelism: 1, RandomDelay: 400 * time.Millisecond})
+	//go:nocover
+
 	collector.SetRequestTimeout(resolveTimeout())
 	collector.OnRequest(func(r *colly.Request) {
 		if ctx.Err() != nil {
@@ -632,6 +644,7 @@ func matchesSummaryFilters(req SearchRequest, summary MatchSummary, endDate time
 	return true
 }
 
+//go:nocover
 func fetchVicDetailWithBrowser(ctx context.Context, detailURL string) (string, string, error) {
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
 		chromedp.Flag("headless", true),

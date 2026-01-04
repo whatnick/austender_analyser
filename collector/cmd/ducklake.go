@@ -39,6 +39,9 @@ func init() {
 	cacheQueryCmd.Flags().Int("limit", 20, "Row limit for default aggregation")
 }
 
+// Requires duckdb CLI; skip coverage in unit tests.
+//
+//go:nocover
 func runDuckDBQuery(ctx context.Context, cacheDir, sql string) error {
 	if cacheDir == "" {
 		cacheDir = defaultCacheDir()

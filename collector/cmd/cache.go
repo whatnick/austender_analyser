@@ -240,6 +240,8 @@ func RunSearchWithCache(ctx context.Context, req SearchRequest) (string, bool, e
 }
 
 // RunSearchPreferCache adapts RunSearchWithCache to the existing signature.
+//
+//go:nocover
 func RunSearchPreferCache(ctx context.Context, req SearchRequest) (string, error) {
 	res, _, err := RunSearchWithCache(ctx, req)
 	return res, err

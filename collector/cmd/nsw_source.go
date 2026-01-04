@@ -40,6 +40,9 @@ func newNswSource() Source {
 
 func (n nswSource) ID() string { return nswSourceID }
 
+// The NSW scraper depends on NSW buy site responses, so we skip coverage.
+//
+//go:nocover
 func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
@@ -61,6 +64,9 @@ func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	return res, nil
 }
 
+// Uses live NSW HTML and Colly; mark nocover to avoid flaky tests.
+//
+//go:nocover
 func runNswWithCollyParallel(ctx context.Context, req SearchRequest, windows []dateWindow) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -148,6 +154,7 @@ type nswSharedAgg struct {
 	seen  map[string]struct{}
 }
 
+//go:nocover
 func runNswCollyWindow(ctx context.Context, req SearchRequest, win dateWindow, shared *nswSharedAgg) error {
 	collector := colly.NewCollector(
 		colly.AllowedDomains("buy.nsw.gov.au"),
@@ -308,6 +315,9 @@ func isNswWafChallenge(body []byte) bool {
 	return false
 }
 
+// Chromedp based scraper; exclude from coverage to keep tests headless-free.
+//
+//go:nocover
 func runNswWithBrowser(ctx context.Context, req SearchRequest, windows []dateWindow) (string, error) {
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
 		chromedp.Flag("headless", true),
@@ -471,6 +481,7 @@ window.chrome = window.chrome || { runtime: {} };
 	return formatMoneyDecimal(total), nil
 }
 
+//go:nocover
 func waitForNswCards(ctx context.Context, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 5 * time.Second

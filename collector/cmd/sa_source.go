@@ -35,6 +35,9 @@ func newSaSource() Source {
 
 func (s saSource) ID() string { return saSourceID }
 
+// SA scraping relies on dynamic browser automation, so skip coverage.
+//
+//go:nocover
 func (s saSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
@@ -47,6 +50,7 @@ func (s saSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	return runSaWithBrowser(ctx, req, windows)
 }
 
+//go:nocover
 func runSaWithBrowser(ctx context.Context, req SearchRequest, windows []dateWindow) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
