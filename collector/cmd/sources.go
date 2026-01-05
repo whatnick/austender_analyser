@@ -114,6 +114,8 @@ type sourcePhraseMatch struct {
 var sourcePhraseMatches = []sourcePhraseMatch{
 	{phrase: "western australian government", sourceID: "wa"},
 	{phrase: "western australia", sourceID: "wa"},
+	{phrase: "queensland government", sourceID: "qld"},
+	{phrase: "queensland", sourceID: "qld"},
 	{phrase: "south australian government", sourceID: "sa"},
 	{phrase: "south australia", sourceID: "sa"},
 	{phrase: "victorian government", sourceID: "vic"},
@@ -133,6 +135,11 @@ var sourceSynonyms = map[string]string{
 	"austender":             "federal",
 	"australian government": "federal",
 	"federal government":    "federal",
+
+	"qld":                   "qld",
+	"queensland":            "qld",
+	"qld government":        "qld",
+	"queensland government": "qld",
 
 	"nsw":             "nsw",
 	"new south wales": "nsw",
@@ -216,6 +223,7 @@ func ensureSourcesRegistered() {
 	registerSource(newVicSource())
 	registerSource(newNswSource())
 	registerSource(newSaSource())
+	registerSource(newQldSource())
 	registerSource(newWaSource())
 }
 
