@@ -21,4 +21,4 @@ Go HTTP + Lambda entrypoint that fronts the collector search helpers and exposes
 - `llm_handler.go` handles prompt wiring and optional MCP config attachment.
 - `mcp_server.go` keeps typed tools in sync with collector helpers; avoid drift when changing request/response structs.
 - Lambda builds use `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` (`task server:build`).
-- Set `OLLAMA_HOST` (and optional `OLLAMA_DEFAULT_MODEL`) to use a local Ollama instance and expose its installed models; otherwise the handler defaults to OpenAI (`OPENAI_DEFAULT_MODEL` overrides the default `gpt-4o-mini`).
+- If `OPENAI_API_KEY` is present the server prefers OpenAI regardless of `OLLAMA_HOST`. Set `OLLAMA_HOST` (plus `OLLAMA_DEFAULT_MODEL` if desired) to surface local models when OpenAI is unavailable. Prefix a requested model with `ollama:` or `openai:` to force a specific backend per-request.

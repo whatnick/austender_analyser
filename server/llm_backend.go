@@ -36,44 +36,91 @@ type LLMModelsResponse struct {
 	DefaultModel string         `json:"defaultModel,omitempty"`
 }
 
+func preferOpenAI() bool {
+	return strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != ""
+}
+
 func isOllamaConfigured() bool {
 	return strings.TrimSpace(os.Getenv("OLLAMA_HOST")) != ""
 }
 
 func currentLLMBackend() string {
+	if preferOpenAI() {
+		return llmBackendOpenAI
+	}
 	if isOllamaConfigured() {
 		return llmBackendOllama
 	}
 	return llmBackendOpenAI
 }
 
-func resolveModelName(requested string) (string, error) {
-	requested = strings.TrimSpace(requested)
+func parseModelRequest(raw string) (backendOverride, model string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	lowerRaw := strings.ToLower(raw)
+	if strings.HasPrefix(lowerRaw, llmBackendOpenAI+":") || strings.HasPrefix(lowerRaw, llmBackendOllama+":") {
+		parts := strings.SplitN(raw, ":", 2)
+		if len(parts) == 2 {
+			backend := strings.ToLower(strings.TrimSpace(parts[0]))
+			name := strings.TrimSpace(parts[1])
+			if name != "" {
+				return backend, name
+			}
+		}
+		return "", ""
+	}
+	return "", raw
+}
+
+func resolveModelName(requested string) (modelName string, backendOverride string, err error) {
+	backendOverride, requested = parseModelRequest(requested)
 	if requested != "" {
-		return requested, nil
+		return requested, backendOverride, nil
 	}
 
 	switch currentLLMBackend() {
 	case llmBackendOllama:
 		if envDefault := strings.TrimSpace(os.Getenv("OLLAMA_DEFAULT_MODEL")); envDefault != "" {
-			return envDefault, nil
+			return envDefault, backendOverride, nil
 		}
 		models, err := getOllamaModels(context.Background())
 		if err != nil {
-			return "", fmt.Errorf("failed to detect Ollama models: %w", err)
+			return "", backendOverride, fmt.Errorf("failed to detect Ollama models: %w", err)
 		}
 		for _, m := range models {
 			if name := m.Name(); name != "" {
-				return name, nil
+				return name, backendOverride, nil
 			}
 		}
-		return "", fmt.Errorf("no Ollama models available; run `ollama list` to install one")
+		return "", backendOverride, fmt.Errorf("no Ollama models available; run `ollama list` to install one")
 	default:
 		if envDefault := strings.TrimSpace(os.Getenv("OPENAI_DEFAULT_MODEL")); envDefault != "" {
-			return envDefault, nil
+			return envDefault, backendOverride, nil
 		}
-		return defaultOpenAIModel, nil
+		return defaultOpenAIModel, backendOverride, nil
 	}
+}
+
+func selectBackend(modelName, backendOverride string) string {
+	switch strings.ToLower(strings.TrimSpace(backendOverride)) {
+	case llmBackendOpenAI:
+		return llmBackendOpenAI
+	case llmBackendOllama:
+		if isOllamaConfigured() {
+			return llmBackendOllama
+		}
+		// Fall back to default if Ollama not available
+	}
+
+	if preferOpenAI() {
+		return llmBackendOpenAI
+	}
+	if isOllamaConfigured() {
+		return llmBackendOllama
+	}
+	return llmBackendOpenAI
 }
 
 func getAvailableLLMModels(ctx context.Context) ([]LLMModelInfo, error) {

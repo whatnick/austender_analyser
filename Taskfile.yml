@@ -12,6 +12,7 @@ env:
       else
         echo ""
       fi
+  GOTOOLCHAIN: go1.25.5
 
 
 includes:
@@ -41,35 +42,57 @@ tasks:
       - bash ./hack/run-local.sh
 
   test:all:
-    desc: Run tests across collector, server, and infra
+    desc: Run tests across collector, server, and infra with merged coverage
     cmds:
-      - task: collector:test
-      - task: server:test
-      - task: infra:test
+      - task: coverage:stack
 
   coverage:collector:
-    desc: Collector coverage report (atomic)
+    desc: Run collector coverage and stage profile into ./coverage
     cmds:
-      - cd collector && go test ./... -covermode=atomic -coverprofile=coverage.out
-      - cd collector && go tool cover -func=coverage.out | tail -n 1
+      - task: collector:test
+      - mkdir -p coverage
+      - cp collector/coverage.out coverage/collector.coverage.out
 
   coverage:server:
-    desc: Server coverage report (atomic)
+    desc: Run server coverage and stage profile into ./coverage
     cmds:
-      - cd server && go test ./... -covermode=atomic -coverprofile=coverage.out
-      - cd server && go tool cover -func=coverage.out | tail -n 1
+      - task: server:test
+      - mkdir -p coverage
+      - cp server/coverage.out coverage/server.coverage.out
 
   coverage:infra:
-    desc: Infra coverage report (atomic)
+    desc: Run infra coverage and stage profile into ./coverage
     cmds:
-      - cd infra && go test ./... -covermode=atomic -coverprofile=coverage.out
-      - cd infra && go tool cover -func=coverage.out | tail -n 1
+      - task: infra:test
+      - mkdir -p coverage
+      - cp infra/coverage.out coverage/infra.coverage.out
 
-  coverage:all:
-    desc: Run coverage for collector, server, infra (no frontend)
+  coverage:merge:
+    desc: Merge staged coverage profiles into coverage/combined.out
     cmds:
+      - |
+        set -euo pipefail
+        coverage_dir="coverage"
+        combined="${coverage_dir}/combined.out"
+        if [ ! -d "$coverage_dir" ]; then
+          echo "coverage directory missing; run coverage staging tasks first" >&2
+          exit 1
+        fi
+        echo "mode: atomic" > "$combined"
+        for profile in "$coverage_dir"/*.coverage.out; do
+          [ -e "$profile" ] || continue
+          tail -n +2 "$profile" >> "$combined"
+        done
+        echo "Merged coverage profile written to $combined"
+
+  coverage:stack:
+    desc: Run coverage across collector, server, infra and merge into coverage/combined.out
+    cmds:
+      - rm -rf coverage
+      - mkdir -p coverage
       - task: coverage:collector
       - task: coverage:server
       - task: coverage:infra
+      - task: coverage:merge
 
  

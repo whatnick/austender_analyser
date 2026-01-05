@@ -5,6 +5,9 @@ version: '3'
 vars:
   GREETING: Hello, World!
 
+env:
+  GOTOOLCHAIN: go1.25.5
+
 tasks:
 
   
@@ -35,12 +38,12 @@ tasks:
   test:
     desc: all go test
     cmds:
-      - go test ./... -v -cover
+      - go test ./... -covermode=atomic -coverprofile=coverage.out -v
 
   coverage:
     desc: Server coverage (atomic)
+    deps: [test]
     cmds:
-      - go test ./... -covermode=atomic -coverprofile=coverage.out
       - go tool cover -func=coverage.out | tail -n 1
 
   tidy:

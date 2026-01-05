@@ -11,33 +11,42 @@ import (
 func TestResolveModelName_DefaultOpenAI(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", "")
 	t.Setenv("OPENAI_DEFAULT_MODEL", "")
+	t.Setenv("OPENAI_API_KEY", "")
 	resetOllamaModelCache()
 
-	got, err := resolveModelName("")
+	got, override, err := resolveModelName("")
 	if err != nil {
 		t.Fatalf("resolveModelName returned error: %v", err)
 	}
 	if got != defaultOpenAIModel {
 		t.Fatalf("expected default model %q, got %q", defaultOpenAIModel, got)
 	}
+	if override != "" {
+		t.Fatalf("expected empty override, got %q", override)
+	}
 }
 
 func TestResolveModelName_OpenAIEnvOverride(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", "")
 	t.Setenv("OPENAI_DEFAULT_MODEL", "gpt-test")
+	t.Setenv("OPENAI_API_KEY", "")
 	resetOllamaModelCache()
 
-	got, err := resolveModelName("")
+	got, override, err := resolveModelName("")
 	if err != nil {
 		t.Fatalf("resolveModelName returned error: %v", err)
 	}
 	if got != "gpt-test" {
 		t.Fatalf("expected override model, got %q", got)
 	}
+	if override != "" {
+		t.Fatalf("expected empty override, got %q", override)
+	}
 }
 
 func TestResolveModelName_Ollama(t *testing.T) {
 	t.Setenv("OPENAI_DEFAULT_MODEL", "")
+	t.Setenv("OPENAI_API_KEY", "")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tags" {
@@ -55,12 +64,15 @@ func TestResolveModelName_Ollama(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", srv.URL)
 	resetOllamaModelCache()
 
-	got, err := resolveModelName("")
+	got, override, err := resolveModelName("")
 	if err != nil {
 		t.Fatalf("resolveModelName returned error: %v", err)
 	}
 	if got != "mistral" {
 		t.Fatalf("expected mistral, got %q", got)
+	}
+	if override != "" {
+		t.Fatalf("expected empty override, got %q", override)
 	}
 
 	models, err := getAvailableLLMModels(context.Background())
@@ -105,5 +117,20 @@ func TestResolveModelName_Ollama(t *testing.T) {
 	}
 	if resp.DefaultModel != "mistral" {
 		t.Fatalf("expected default model mistral, got %s", resp.DefaultModel)
+	}
+}
+
+func TestSelectBackendPrefersOpenAI(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+	backend := selectBackend("", "")
+	if backend != llmBackendOpenAI {
+		t.Fatalf("expected backend %s, got %s", llmBackendOpenAI, backend)
+	}
+
+	backend = selectBackend("", llmBackendOllama)
+	if backend != llmBackendOllama {
+		t.Fatalf("expected override to force ollama, got %s", backend)
 	}
 }

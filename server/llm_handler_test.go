@@ -68,7 +68,7 @@ func TestLLMHandler_AgentMode_ToolChain(t *testing.T) {
 
 	// Stub LLM client construction.
 	oldNew := newLLMClient
-	newLLMClient = func(modelName string) (llms.Model, error) { return dummyLLM{}, nil }
+	newLLMClient = func(modelName, backendOverride string) (llms.Model, error) { return dummyLLM{}, nil }
 	defer func() { newLLMClient = oldNew }()
 
 	// Stub tool-driving LLM outputs.

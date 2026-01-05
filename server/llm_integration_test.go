@@ -34,7 +34,7 @@ func TestLLMHandlerWithLlamaCPP(t *testing.T) {
 
 	// Override LLM factory to use local llamacpp.
 	oldFactory := newLLMClient
-	newLLMClient = func(_ string) (llms.Model, error) {
+	newLLMClient = func(_ string, _ string) (llms.Model, error) {
 		return llamacpp.New(
 			llamacpp.WithModelPath(modelPath),
 			llamacpp.WithPredictTokens(32),

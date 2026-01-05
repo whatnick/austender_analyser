@@ -18,8 +18,9 @@ import (
 )
 
 // newLLMClient builds the LLM used by the handler. Overridden in integration tests.
-var newLLMClient = func(modelName string) (llms.Model, error) {
-	if isOllamaConfigured() {
+var newLLMClient = func(modelName, backendOverride string) (llms.Model, error) {
+	backend := selectBackend(modelName, backendOverride)
+	if backend == llmBackendOllama {
 		opts := []ollama.Option{ollama.WithModel(modelName)}
 		if base := strings.TrimSpace(os.Getenv("OLLAMA_HOST")); base != "" {
 			opts = append(opts, ollama.WithServerURL(normalizeOllamaURL(base)))
@@ -69,7 +70,7 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modelName, err := resolveModelName(strings.TrimSpace(req.Model))
+	modelName, backendOverride, err := resolveModelName(strings.TrimSpace(req.Model))
 	if err != nil {
 		sendJSONError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -78,7 +79,7 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	mcpContext := strings.TrimSpace(string(req.MCPConfig))
 	basePrompt := req.Prompt
 
-	client, err := newLLMClient(modelName)
+	client, err := newLLMClient(modelName, backendOverride)
 	if err != nil {
 		msg := fmt.Sprintf("llm init failed: %v", err)
 		if strings.Contains(msg, "OPENAI_API_KEY") || strings.Contains(msg, "no API key") {

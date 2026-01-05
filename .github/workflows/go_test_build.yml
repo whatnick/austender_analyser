@@ -20,26 +20,18 @@ jobs:
           cache: true
           cache-dependency-path: '**/go.sum'
 
-      - name: Collector coverage
-        run: |
-          cd collector
-          go test ./... -covermode=atomic -coverprofile=coverage.out
+      - name: Install Task
+        uses: arduino/setup-task@v1
 
-      - name: Server coverage
-        run: |
-          cd server
-          go test ./... -covermode=atomic -coverprofile=coverage.out
-
-      - name: Infra coverage
-        run: |
-          cd infra
-          go test ./... -covermode=atomic -coverprofile=coverage.out
+      - name: Run stack coverage
+        run: task coverage:stack
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v4
         with:
           name: coverage-profiles
           path: |
+            coverage/
             collector/coverage.out
             server/coverage.out
             infra/coverage.out
@@ -48,9 +40,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: |
-            collector/coverage.out
-            server/coverage.out
-            infra/coverage.out
+            coverage/combined.out
           fail_ci_if_error: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

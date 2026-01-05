@@ -2,16 +2,19 @@
 
 version: '3'
 
+env:
+  GOTOOLCHAIN: go1.25.5
+
 tasks:
   test:
     desc: Run collector tests
     cmds:
-      - go test ./... -v
+      - go test ./... -covermode=atomic -coverprofile=coverage.out -v
 
   coverage:
     desc: Collector coverage (atomic)
+    deps: [test]
     cmds:
-      - go test ./... -covermode=atomic -coverprofile=coverage.out
       - go tool cover -func=coverage.out | tail -n 1
 
   tidy:
