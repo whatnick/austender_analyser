@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -42,10 +43,8 @@ func (s saSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
 
-	windows := []dateWindow{{start: startResolved, end: endResolved}}
-	if req.ShouldFetchWindow != nil {
-		windows = splitDateWindows(startResolved, endResolved, maxWindowDays)
-	}
+	// Align to the lake's month partitions so cache skipping works reliably.
+	windows := splitDateWindowsByMonth(startResolved, endResolved)
 
 	return runSaWithBrowser(ctx, req, windows)
 }
@@ -56,19 +55,91 @@ func runSaWithBrowser(ctx context.Context, req SearchRequest, windows []dateWind
 		ctx = context.Background()
 	}
 
-	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
+	maxWorkers := resolveMaxConcurrency()
+	if maxWorkers <= 0 {
+		maxWorkers = 1
+	}
+	if len(windows) > 0 && maxWorkers > len(windows) {
+		maxWorkers = len(windows)
+	}
+
+	total := decimal.Zero
+	seen := make(map[string]struct{})
+	var mu sync.Mutex
+
+	var completed atomic.Int64
+	jobs := make(chan dateWindow)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := saWorker(ctx, req, jobs, &completed, len(windows), &mu, seen, &total); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				cancel()
+			}
+		}()
+	}
+
+	// Feed month windows.
+	for _, win := range windows {
+		if ctx.Err() != nil {
+			break
+		}
+		if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+			done := int(completed.Add(1))
+			if req.OnProgress != nil {
+				req.OnProgress(done, len(windows))
+			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			break
+		case jobs <- win:
+			// Progress is reported by workers when the job finishes.
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return "", err
+		}
+	default:
+	}
+
+	mu.Lock()
+	out := formatMoneyDecimal(total)
+	mu.Unlock()
+	return out, nil
+}
+
+// saWorker owns a single browser session and processes month windows sequentially.
+func saWorker(ctx context.Context, req SearchRequest, jobs <-chan dateWindow, completed *atomic.Int64, totalWindows int, mu *sync.Mutex, seen map[string]struct{}, total *decimal.Decimal) error {
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx,
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.UserAgent(saUserAgent),
 	)
-	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+	bctx, cancelCtx := chromedp.NewContext(allocCtx)
 	defer cancelCtx()
-	defer cancel()
+	defer cancelAlloc()
 
 	// Best-effort: reduce headless detection used by bot protections.
-	_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	_ = chromedp.Run(bctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		params := page.AddScriptToEvaluateOnNewDocument(`
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 window.chrome = window.chrome || { runtime: {} };
@@ -77,193 +148,187 @@ window.chrome = window.chrome || { runtime: {} };
 		return err
 	}))
 
-	total := decimal.Zero
-	seen := make(map[string]struct{})
-	var mu sync.Mutex
-
-	completed := 0
-	for _, win := range windows {
-		if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
-			completed++
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case win, ok := <-jobs:
+			if !ok {
+				return nil
+			}
+			if err := scrapeSaWindow(bctx, req, win, mu, seen, total); err != nil {
+				return err
+			}
+			done := int(completed.Add(1))
 			if req.OnProgress != nil {
-				req.OnProgress(completed, len(windows))
+				req.OnProgress(done, totalWindows)
 			}
-			continue
-		}
-
-		newCount := 0
-		for pageNum := 1; pageNum <= 250; pageNum++ {
-			if ctx.Err() != nil {
-				return "", ctx.Err()
-			}
-
-			target := buildSaSearchURL(req, pageNum, win.start, win.end)
-			var pageHTML string
-			if err := chromedp.Run(ctx,
-				chromedp.Navigate(target),
-				chromedp.WaitReady("body", chromedp.ByQuery),
-				chromedp.Sleep(1200*time.Millisecond),
-				chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
-			); err != nil {
-				return "", err
-			}
-
-			// Cloudflare may present a JS challenge.
-			if isSaCloudflareBlocked(pageHTML) {
-				// Give it a moment to complete, then re-read once.
-				if err := chromedp.Run(ctx,
-					chromedp.Sleep(4*time.Second),
-					chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
-				); err != nil {
-					return "", err
-				}
-				if isSaCloudflareBlocked(pageHTML) {
-					return "", errSaBlocked
-				}
-			}
-
-			doc, err := goquery.NewDocumentFromReader(strings.NewReader(pageHTML))
-			if err != nil {
-				return "", err
-			}
-
-			if strings.EqualFold(strings.TrimSpace(os.Getenv("SA_DEBUG_HTML")), "true") {
-				_ = os.WriteFile(fmt.Sprintf("/tmp/sa_page_%d.html", pageNum), []byte(pageHTML), 0o600)
-			}
-
-			table, colIdx := findSaResultsTable(doc)
-			if table == nil {
-				// No results or layout changed.
-				break
-			}
-
-			rows := table.Find("tbody tr")
-			if rows.Length() == 0 {
-				rows = table.Find("tr") // Fallback for headerless tables
-			}
-			if rows.Length() == 0 {
-				break
-			}
-
-			pageMatches := 0
-			rows.Each(func(i int, tr *goquery.Selection) {
-				cells := tr.Find("td")
-				if cells.Length() == 0 {
-					return
-				}
-
-				get := func(i int) string {
-					if i < 0 || i >= cells.Length() {
-						return ""
-					}
-					cell := cells.Eq(i).Clone()
-					cell.Find(".tablesaw-cell-label").Remove()
-					return strings.TrimSpace(strings.Join(strings.Fields(cell.Text()), " "))
-				}
-
-				contractID := get(firstIndex(colIdx, "reference", "code", "contract", "id"))
-				title := get(firstIndex(colIdx, "description", "title"))
-				buyer := get(firstIndex(colIdx, "buyer", "agency"))
-				supplier := get(firstIndex(colIdx, "supplier", "contractor"))
-				startDate := parseSaDate(get(firstIndex(colIdx, "start date", "start")))
-				awardDate := parseSaDate(get(firstIndex(colIdx, "awarded date", "awarded")))
-
-				amount := decimal.Zero
-				if val := get(firstIndex(colIdx, "value", "amount", "cost", "total cost")); val != "" {
-					if parsed, err := parseMoneyToDecimal(val); err == nil {
-						amount = parsed
-					}
-				}
-
-				if contractID == "" {
-					contractID = title
-				}
-				if contractID == "" {
-					return
-				}
-
-				// Heuristic: if supplier/agency are missing from the table but we searched for them,
-				// populate them so they pass filters and provide some context.
-				if supplier == "" && req.Keyword != "" {
-					supplier = req.Keyword
-				}
-				if supplier == "" && req.Company != "" {
-					supplier = req.Company
-				}
-				if buyer == "" && req.Agency != "" {
-					buyer = req.Agency
-				}
-
-				mu.Lock()
-				if _, ok := seen[contractID]; ok {
-					mu.Unlock()
-					return
-				}
-				seen[contractID] = struct{}{}
-				mu.Unlock()
-
-				releaseDate := awardDate
-				if releaseDate.IsZero() {
-					releaseDate = startDate
-				}
-
-				summary := MatchSummary{
-					Source:      saSourceID,
-					ContractID:  contractID,
-					ReleaseID:   contractID,
-					OCID:        contractID,
-					Supplier:    supplier,
-					Agency:      buyer,
-					Title:       title,
-					Amount:      amount,
-					ReleaseDate: releaseDate,
-				}
-
-				if req.OnAnyMatch != nil {
-					req.OnAnyMatch(summary)
-				}
-				if !matchesSummaryFilters(req, summary, time.Time{}) {
-					return
-				}
-				if req.OnMatch != nil {
-					req.OnMatch(summary)
-				}
-
-				mu.Lock()
-				total = total.Add(summary.Amount)
-				mu.Unlock()
-				pageMatches++
-			})
-
-			newCount += pageMatches
-			// Check if there is a next page link in the paging div
-			hasNext := false
-			doc.Find(".paging a").Each(func(_ int, s *goquery.Selection) {
-				if strings.Contains(strings.ToLower(s.AttrOr("title", "")), "go to page") {
-					// If the page number in the link is greater than current pageNum, we have a next page
-					href := s.AttrOr("href", "")
-					if strings.Contains(href, fmt.Sprintf("page.value=%d", pageNum+1)) {
-						hasNext = true
-					}
-				}
-			})
-
-			if !hasNext {
-				break
-			}
-		}
-
-		_ = newCount
-		completed++
-		if req.OnProgress != nil {
-			req.OnProgress(completed, len(windows))
 		}
 	}
+}
 
-	mu.Lock()
-	out := formatMoneyDecimal(total)
-	mu.Unlock()
-	return out, nil
+func scrapeSaWindow(ctx context.Context, req SearchRequest, win dateWindow, mu *sync.Mutex, seen map[string]struct{}, total *decimal.Decimal) error {
+	for pageNum := 1; pageNum <= 250; pageNum++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		target := buildSaSearchURL(req, pageNum, win.start, win.end)
+		var pageHTML string
+		if err := chromedp.Run(ctx,
+			chromedp.Navigate(target),
+			chromedp.WaitReady("body", chromedp.ByQuery),
+			chromedp.Sleep(1200*time.Millisecond),
+			chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
+		); err != nil {
+			return err
+		}
+
+		// Cloudflare may present a JS challenge.
+		if isSaCloudflareBlocked(pageHTML) {
+			// Give it a moment to complete, then re-read once.
+			if err := chromedp.Run(ctx,
+				chromedp.Sleep(4*time.Second),
+				chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
+			); err != nil {
+				return err
+			}
+			if isSaCloudflareBlocked(pageHTML) {
+				return errSaBlocked
+			}
+		}
+
+		doc, err := goquery.NewDocumentFromReader(strings.NewReader(pageHTML))
+		if err != nil {
+			return err
+		}
+
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("SA_DEBUG_HTML")), "true") {
+			_ = os.WriteFile(fmt.Sprintf("/tmp/sa_page_%d.html", pageNum), []byte(pageHTML), 0o600)
+		}
+
+		table, colIdx := findSaResultsTable(doc)
+		if table == nil {
+			// No results or layout changed.
+			break
+		}
+
+		rows := table.Find("tbody tr")
+		if rows.Length() == 0 {
+			rows = table.Find("tr") // Fallback for headerless tables
+		}
+		if rows.Length() == 0 {
+			break
+		}
+
+		pageMatches := 0
+		rows.Each(func(i int, tr *goquery.Selection) {
+			cells := tr.Find("td")
+			if cells.Length() == 0 {
+				return
+			}
+
+			get := func(i int) string {
+				if i < 0 || i >= cells.Length() {
+					return ""
+				}
+				cell := cells.Eq(i).Clone()
+				cell.Find(".tablesaw-cell-label").Remove()
+				return strings.TrimSpace(strings.Join(strings.Fields(cell.Text()), " "))
+			}
+
+			contractID := get(firstIndex(colIdx, "reference", "code", "contract", "id"))
+			title := get(firstIndex(colIdx, "description", "title"))
+			buyer := get(firstIndex(colIdx, "buyer", "agency"))
+			supplier := get(firstIndex(colIdx, "supplier", "contractor"))
+			startDate := parseSaDate(get(firstIndex(colIdx, "start date", "start")))
+			awardDate := parseSaDate(get(firstIndex(colIdx, "awarded date", "awarded")))
+
+			amount := decimal.Zero
+			if val := get(firstIndex(colIdx, "value", "amount", "cost", "total cost")); val != "" {
+				if parsed, err := parseMoneyToDecimal(val); err == nil {
+					amount = parsed
+				}
+			}
+
+			if contractID == "" {
+				contractID = title
+			}
+			if contractID == "" {
+				return
+			}
+
+			// Heuristic: if supplier/agency are missing from the table but we searched for them,
+			// populate them so they pass filters and provide some context.
+			if supplier == "" && req.Keyword != "" {
+				supplier = req.Keyword
+			}
+			if supplier == "" && req.Company != "" {
+				supplier = req.Company
+			}
+			if buyer == "" && req.Agency != "" {
+				buyer = req.Agency
+			}
+
+			mu.Lock()
+			if _, ok := seen[contractID]; ok {
+				mu.Unlock()
+				return
+			}
+			seen[contractID] = struct{}{}
+			mu.Unlock()
+
+			releaseDate := awardDate
+			if releaseDate.IsZero() {
+				releaseDate = startDate
+			}
+
+			summary := MatchSummary{
+				Source:      saSourceID,
+				ContractID:  contractID,
+				ReleaseID:   contractID,
+				OCID:        contractID,
+				Supplier:    supplier,
+				Agency:      buyer,
+				Title:       title,
+				Amount:      amount,
+				ReleaseDate: releaseDate,
+			}
+
+			if req.OnAnyMatch != nil {
+				req.OnAnyMatch(summary)
+			}
+			if !matchesSummaryFilters(req, summary, time.Time{}) {
+				return
+			}
+			if req.OnMatch != nil {
+				req.OnMatch(summary)
+			}
+
+			mu.Lock()
+			*total = (*total).Add(summary.Amount)
+			mu.Unlock()
+			pageMatches++
+		})
+
+		_ = pageMatches
+		// Check if there is a next page link in the paging div
+		hasNext := false
+		doc.Find(".paging a").Each(func(_ int, s *goquery.Selection) {
+			if strings.Contains(strings.ToLower(s.AttrOr("title", "")), "go to page") {
+				// If the page number in the link is greater than current pageNum, we have a next page
+				href := s.AttrOr("href", "")
+				if strings.Contains(href, fmt.Sprintf("page.value=%d", pageNum+1)) {
+					hasNext = true
+				}
+			}
+		})
+
+		if !hasNext {
+			break
+		}
+	}
+	return nil
 }
 
 func buildSaSearchURL(req SearchRequest, pageNum int, startDateFrom, startDateTo time.Time) string {

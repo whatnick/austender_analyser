@@ -29,7 +29,7 @@ const (
 	initialRetryDelay     = time.Second
 )
 
-var defaultMaxConcurrency = determineDefaultConcurrency()
+var defaultMaxConcurrency = resolveMaxConcurrency()
 
 var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -664,10 +664,20 @@ type dateWindow struct {
 	end   time.Time
 }
 
+func dateOnlyUTC(t time.Time) time.Time {
+	if t.IsZero() {
+		return time.Time{}
+	}
+	y, m, d := t.UTC().Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
+
 func splitDateWindows(start, end time.Time, windowDays int) []dateWindow {
 	if windowDays <= 0 {
 		windowDays = maxWindowDays
 	}
+	start = dateOnlyUTC(start)
+	end = dateOnlyUTC(end)
 	if end.Before(start) {
 		return []dateWindow{{start: start, end: end}}
 	}
@@ -693,6 +703,41 @@ func splitDateWindows(start, end time.Time, windowDays int) []dateWindow {
 	return windows
 }
 
+// splitDateWindowsByMonth splits a date range into non-overlapping windows that each
+// fit within a single calendar month (UTC). This aligns window boundaries with the
+// data lake month partitioning.
+func splitDateWindowsByMonth(start, end time.Time) []dateWindow {
+	start = dateOnlyUTC(start)
+	end = dateOnlyUTC(end)
+	if end.Before(start) {
+		return []dateWindow{{start: start, end: end}}
+	}
+	if start.Equal(end) {
+		return []dateWindow{{start: start, end: end}}
+	}
+
+	var windows []dateWindow
+	current := start
+	for !current.After(end) {
+		y, m, _ := current.Date()
+		monthEnd := time.Date(y, m+1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+		winEnd := monthEnd
+		if winEnd.After(end) {
+			winEnd = end
+		}
+		windows = append(windows, dateWindow{start: current, end: winEnd})
+		if winEnd.Equal(end) {
+			break
+		}
+		// Move to first day of next month.
+		current = time.Date(y, m+1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	if len(windows) == 0 {
+		windows = append(windows, dateWindow{start: start, end: end})
+	}
+	return windows
+}
+
 func resolveTimeout() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("AUSTENDER_REQUEST_TIMEOUT"))
 	if raw == "" {
@@ -707,10 +752,23 @@ func resolveTimeout() time.Duration {
 
 func determineDefaultConcurrency() int {
 	cores := runtime.NumCPU()
-	if cores <= 1 {
+	// Leave headroom for browser automation / OS scheduling.
+	if cores <= 2 {
 		return 1
 	}
-	return cores - 1
+	return cores - 2
+}
+
+func resolveMaxConcurrency() int {
+	raw := strings.TrimSpace(os.Getenv("MAX_CONCURRENCY"))
+	if raw == "" {
+		return determineDefaultConcurrency()
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return determineDefaultConcurrency()
+	}
+	return n
 }
 
 func resolveLookbackPeriod(override int) int {

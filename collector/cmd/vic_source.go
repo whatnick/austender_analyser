@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -46,16 +47,105 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	req.StartDate = startResolved
 	req.EndDate = endResolved
 
-	target := buildVicSearchURL(req)
+	fullTarget := buildVicSearchURL(req)
 	if strings.EqualFold(os.Getenv("VIC_USE_BROWSER"), "true") {
-		return runVicWithBrowser(ctx, target, req)
+		return runVicWithBrowser(ctx, fullTarget, req)
 	}
+
+	windows := splitDateWindowsByMonth(startResolved, endResolved)
+	if len(windows) == 0 {
+		return formatMoneyDecimal(decimal.Zero), nil
+	}
+
+	maxConc := resolveMaxConcurrency()
+	if maxConc < 1 {
+		maxConc = 1
+	}
+	if maxConc > len(windows) {
+		maxConc = len(windows)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Shared accumulator across windows.
+	var totalsMu sync.Mutex
+	var cbMu sync.Mutex
+	seen := make(map[string]struct{})
+	total := decimal.Zero
+	var observedRows atomic.Int64
+
+	var completed atomic.Int32
+	notifyProgress := func() {
+		if req.OnProgress != nil {
+			req.OnProgress(int(completed.Load()), len(windows))
+		}
+	}
+
+	sem := make(chan struct{}, maxConc)
+	var wg sync.WaitGroup
+	var firstErr error
+	var firstErrMu sync.Mutex
+
+	for _, win := range windows {
+		win := win
+		if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+			completed.Add(1)
+			notifyProgress()
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			if err := scrapeVicWindow(ctx, req, win, &totalsMu, &cbMu, seen, &total, &observedRows); err != nil {
+				firstErrMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				firstErrMu.Unlock()
+				return
+			}
+			completed.Add(1)
+			notifyProgress()
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		if errors.Is(firstErr, errVicForbidden) || strings.Contains(strings.ToLower(firstErr.Error()), "forbidden") {
+			return runVicWithBrowser(ctx, fullTarget, req)
+		}
+		return "", firstErr
+	}
+
+	if observedRows.Load() == 0 && ctx.Err() == nil {
+		// The VIC search page is frequently rendered client-side. In those cases Colly sees an empty
+		// table despite a 200 response. If we didn't observe any result rows, retry with headless Chrome.
+		return runVicWithBrowser(ctx, fullTarget, req)
+	}
+
+	return formatMoneyDecimal(total), nil
+}
+
+//go:nocover
+func scrapeVicWindow(ctx context.Context, req SearchRequest, win dateWindow, totalsMu, cbMu *sync.Mutex, seen map[string]struct{}, total *decimal.Decimal, observedRows *atomic.Int64) error {
+	localReq := req
+	localReq.StartDate = win.start
+	localReq.EndDate = win.end
+	localTarget := buildVicSearchURL(localReq)
 
 	collector := colly.NewCollector(
 		colly.AllowedDomains("www.tenders.vic.gov.au", "tenders.vic.gov.au"),
 		colly.AllowURLRevisit(),
 		colly.UserAgent(vicUserAgent),
-		colly.CacheDir(filepath.Join(defaultCacheDir(), "vic_cookies")),
+		colly.CacheDir(filepath.Join(defaultCacheDir(), fmt.Sprintf("vic_cookies_%d", time.Now().UnixNano()))),
 	)
 	collector.WithTransport(&http.Transport{Proxy: http.ProxyFromEnvironment})
 	_ = collector.Limit(&colly.LimitRule{DomainGlob: "*tenders.vic.gov.au*", Parallelism: 2, RandomDelay: 500 * time.Millisecond})
@@ -72,14 +162,9 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	})
 
 	var scrapeErr error
-	total := decimal.Zero
-	observedRows := 0
-	var totalsMu sync.Mutex
-
 	collector.OnError(func(_ *colly.Response, err error) {
 		scrapeErr = err
 	})
-
 	collector.OnResponse(func(r *colly.Response) {
 		// Buying for Victoria intermittently blocks non-browser clients.
 		// Treat 403 as a signal to fall back to the headless browser flow.
@@ -94,9 +179,7 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 			return
 		}
 		e.DOM.Find("tbody tr").Each(func(_ int, row *goquery.Selection) {
-			totalsMu.Lock()
-			observedRows++
-			totalsMu.Unlock()
+			observedRows.Add(1)
 			cells := row.Find("td")
 			if cells.Length() < 6 {
 				return
@@ -113,6 +196,14 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 			if !isLikelyVicContractID(contractID) {
 				return
 			}
+			totalsMu.Lock()
+			if _, ok := seen[contractID]; ok {
+				totalsMu.Unlock()
+				return
+			}
+			seen[contractID] = struct{}{}
+			totalsMu.Unlock()
+
 			title := getText(1)
 			status := getText(2)
 			startDate := parseVicDate(getText(3))
@@ -157,13 +248,6 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 				agency = req.Agency
 			}
 
-			if supplier == "" && req.Company != "" {
-				supplier = req.Company
-			}
-			if agency == "" && req.Agency != "" {
-				agency = req.Agency
-			}
-
 			summary := MatchSummary{
 				Source:      vicSourceID,
 				ContractID:  contractID,
@@ -176,19 +260,23 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 				ReleaseDate: startDate,
 			}
 
-			if req.OnAnyMatch != nil {
-				req.OnAnyMatch(summary)
+			if localReq.OnAnyMatch != nil {
+				cbMu.Lock()
+				localReq.OnAnyMatch(summary)
+				cbMu.Unlock()
 			}
 
-			if !matchesSummaryFilters(req, summary, endDate) {
+			if !matchesSummaryFilters(localReq, summary, endDate) {
 				return
 			}
 
-			if req.OnMatch != nil {
-				req.OnMatch(summary)
+			if localReq.OnMatch != nil {
+				cbMu.Lock()
+				localReq.OnMatch(summary)
+				cbMu.Unlock()
 			}
 			totalsMu.Lock()
-			total = total.Add(summary.Amount)
+			*total = (*total).Add(summary.Amount)
 			totalsMu.Unlock()
 		})
 	})
@@ -209,31 +297,20 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		"Referer":         []string{vicSearchURL},
 	})
 
-	if err := collector.Visit(target); err != nil {
-		// Some blocks surface as a Visit error.
+	if err := collector.Visit(localTarget); err != nil {
 		if errors.Is(err, errVicForbidden) || strings.Contains(strings.ToLower(err.Error()), "forbidden") {
-			return runVicWithBrowser(ctx, target, req)
+			return errVicForbidden
 		}
-		return "", err
+		return err
 	}
 	collector.Wait()
 	if scrapeErr != nil {
 		if errors.Is(scrapeErr, errVicForbidden) || strings.Contains(strings.ToLower(scrapeErr.Error()), "forbidden") {
-			return runVicWithBrowser(ctx, target, req)
+			return errVicForbidden
 		}
-		return "", scrapeErr
+		return scrapeErr
 	}
-
-	// The VIC search page is frequently rendered client-side. In those cases Colly sees an empty
-	// table despite a 200 response. If we didn't observe any result rows, retry with headless Chrome.
-	totalsMu.Lock()
-	rows := observedRows
-	totalsMu.Unlock()
-	if rows == 0 && ctx.Err() == nil {
-		return runVicWithBrowser(ctx, target, req)
-	}
-
-	return formatMoneyDecimal(total), nil
+	return nil
 }
 
 func buildVicSearchURL(req SearchRequest) string {

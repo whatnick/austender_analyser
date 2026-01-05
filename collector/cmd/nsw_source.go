@@ -47,8 +47,8 @@ func (n nswSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	lookbackPeriod := resolveLookbackPeriod(req.LookbackPeriod)
 	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, lookbackPeriod)
 
-	// Always use monthly windows for NSW so lookbacks can run in parallel.
-	windows := splitDateWindows(startResolved, endResolved, maxWindowDays)
+	// Use calendar-month windows so lookbacks can run in parallel and align with lake partitions.
+	windows := splitDateWindowsByMonth(startResolved, endResolved)
 
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("NSW_USE_BROWSER")), "true") {
 		return runNswWithBrowser(ctx, req, windows)
@@ -319,166 +319,253 @@ func isNswWafChallenge(body []byte) bool {
 //
 //go:nocover
 func runNswWithBrowser(ctx context.Context, req SearchRequest, windows []dateWindow) (string, error) {
-	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(windows) == 0 {
+		return formatMoneyDecimal(decimal.Zero), nil
+	}
+
+	maxWorkers := resolveMaxConcurrency()
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
+	if maxWorkers > len(windows) {
+		maxWorkers = len(windows)
+	}
+
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx,
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.UserAgent(nswUserAgent),
 	)
-	ctx, cancelCtx := chromedp.NewContext(allocCtx)
-	defer cancelCtx()
+	defer cancelAlloc()
+
+	ctx, cancel := context.WithCancel(allocCtx)
 	defer cancel()
 
-	// Best-effort: reduce headless detection used by some bot protections.
-	_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		_, err := page.AddScriptToEvaluateOnNewDocument(`
+	var mu sync.Mutex
+	var cbMu sync.Mutex
+	seen := make(map[string]struct{})
+	total := decimal.Zero
+
+	var completed atomic.Int64
+	jobs := make(chan dateWindow)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tabCtx, cancelTab := chromedp.NewContext(ctx)
+			defer cancelTab()
+
+			// Best-effort: reduce headless detection used by some bot protections.
+			_ = chromedp.Run(tabCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+				_, err := page.AddScriptToEvaluateOnNewDocument(`
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 window.chrome = window.chrome || { runtime: {} };
 `).Do(ctx)
-		return err
-	}))
+				return err
+			}))
 
-	total := decimal.Zero
-	seen := make(map[string]struct{})
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case win, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if err := scrapeNswBrowserWindow(tabCtx, req, win, &mu, &cbMu, seen, &total); err != nil {
+						select {
+						case errCh <- err:
+						default:
+						}
+						cancel()
+						return
+					}
+					done := int(completed.Add(1))
+					if req.OnProgress != nil {
+						req.OnProgress(done, len(windows))
+					}
+				}
+			}
+		}()
+	}
 
-	completed := 0
 	for _, win := range windows {
+		if ctx.Err() != nil {
+			break
+		}
 		if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
-			completed++
+			done := int(completed.Add(1))
 			if req.OnProgress != nil {
-				req.OnProgress(completed, len(windows))
+				req.OnProgress(done, len(windows))
 			}
 			continue
 		}
-
-		currentURL := buildNswSearchURL(req, 1, win.start, win.end)
-		for page := 0; page < 200; page++ {
-			var pageHTML string
-			if err := chromedp.Run(ctx,
-				chromedp.Navigate(currentURL),
-				chromedp.WaitReady("body", chromedp.ByQuery),
-			); err != nil {
-				return "", err
-			}
-
-			// Allow time for AWS WAF JS challenge / async results to complete.
-			_ = waitForNswCards(ctx, 12*time.Second)
-
-			if err := chromedp.Run(ctx,
-				chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
-			); err != nil {
-				return "", err
-			}
-
-			lower := strings.ToLower(pageHTML)
-			if strings.Contains(lower, "awswafcookiedomainlist") || strings.Contains(lower, "gokuprops") {
-				// Give the challenge a bit more time to complete in-browser, then re-read once.
-				if err := chromedp.Run(ctx,
-					chromedp.Sleep(4*time.Second),
-					chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
-				); err != nil {
-					return "", err
-				}
-			}
-
-			doc, err := goquery.NewDocumentFromReader(strings.NewReader(pageHTML))
-			if err != nil {
-				return "", err
-			}
-
-			cards := doc.Find("ul.cards.profiles > li")
-			cards.Each(func(_ int, s *goquery.Selection) {
-				title := strings.TrimSpace(s.Find("h3 a").First().Text())
-				noticeHref, _ := s.Find("h3 a").First().Attr("href")
-				noticeURL := strings.TrimSpace(noticeHref)
-				if strings.HasPrefix(noticeURL, "/") {
-					noticeURL = "https://buy.nsw.gov.au" + noticeURL
-				}
-				noticeID := extractNswNoticeID(noticeURL)
-
-				fields := extractNswDetails(s)
-				agency := strings.TrimSpace(fields["agency"])
-				supplier := strings.TrimSpace(fields["contractor name"])
-				canID := strings.TrimSpace(fields["can id"])
-
-				publishDate := parseNswDate(fields["publish date"])
-				periodStart, periodEnd := parseNswContractPeriod(fields["contract period"])
-
-				amount := decimal.Zero
-				if rawAmt := fields["estimated amount payable to the contractor (including gst)"]; rawAmt != "" {
-					if parsed, err := parseMoneyToDecimal(rawAmt); err == nil {
-						amount = parsed
-					}
-				}
-
-				contractID := canID
-				if contractID == "" {
-					contractID = noticeID
-				}
-				if contractID == "" {
-					contractID = title
-				}
-				if contractID == "" {
-					return
-				}
-				if _, ok := seen[contractID]; ok {
-					return
-				}
-				seen[contractID] = struct{}{}
-
-				summary := MatchSummary{
-					Source:      nswSourceID,
-					ContractID:  contractID,
-					ReleaseID:   noticeID,
-					OCID:        contractID,
-					Supplier:    supplier,
-					Agency:      agency,
-					Title:       title,
-					Amount:      amount,
-					ReleaseDate: publishDate,
-				}
-
-				if req.OnAnyMatch != nil {
-					req.OnAnyMatch(summary)
-				}
-				if !matchesSummaryFilters(req, summary, periodEnd) {
-					return
-				}
-				if !req.StartDate.IsZero() && !periodStart.IsZero() && periodStart.Before(req.StartDate) {
-					// keep conservative
-				}
-				if req.OnMatch != nil {
-					req.OnMatch(summary)
-				}
-				total = total.Add(summary.Amount)
-			})
-
-			nextHref := strings.TrimSpace(doc.Find(".nsw-pagination__item--next-page a.nsw-direction-link.choose-page").First().AttrOr("href", ""))
-			if nextHref == "" {
-				break
-			}
-			if strings.HasPrefix(strings.ToLower(nextHref), "javascript:") {
-				break
-			}
-			baseURL, err := url.Parse(currentURL)
-			if err != nil {
-				break
-			}
-			refURL, err := url.Parse(nextHref)
-			if err != nil {
-				break
-			}
-			currentURL = baseURL.ResolveReference(refURL).String()
-		}
-
-		completed++
-		if req.OnProgress != nil {
-			req.OnProgress(completed, len(windows))
+		select {
+		case <-ctx.Done():
+			break
+		case jobs <- win:
 		}
 	}
+	close(jobs)
+	wg.Wait()
 
-	return formatMoneyDecimal(total), nil
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return "", err
+		}
+	default:
+	}
+
+	mu.Lock()
+	out := formatMoneyDecimal(total)
+	mu.Unlock()
+	return out, nil
+}
+
+// scrapeNswBrowserWindow navigates the NSW listing pages for a date window using chromedp and updates shared totals.
+func scrapeNswBrowserWindow(ctx context.Context, req SearchRequest, win dateWindow, mu, cbMu *sync.Mutex, seen map[string]struct{}, total *decimal.Decimal) error {
+	currentURL := buildNswSearchURL(req, 1, win.start, win.end)
+	for pageNum := 0; pageNum < 200; pageNum++ {
+		var pageHTML string
+		if err := chromedp.Run(ctx,
+			chromedp.Navigate(currentURL),
+			chromedp.WaitReady("body", chromedp.ByQuery),
+		); err != nil {
+			return err
+		}
+
+		// Allow time for AWS WAF JS challenge / async results to complete.
+		_ = waitForNswCards(ctx, 12*time.Second)
+
+		if err := chromedp.Run(ctx,
+			chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
+		); err != nil {
+			return err
+		}
+
+		lower := strings.ToLower(pageHTML)
+		if strings.Contains(lower, "awswafcookiedomainlist") || strings.Contains(lower, "gokuprops") {
+			// Give the challenge a bit more time to complete in-browser, then re-read once.
+			if err := chromedp.Run(ctx,
+				chromedp.Sleep(4*time.Second),
+				chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
+			); err != nil {
+				return err
+			}
+		}
+
+		doc, err := goquery.NewDocumentFromReader(strings.NewReader(pageHTML))
+		if err != nil {
+			return err
+		}
+
+		cards := doc.Find("ul.cards.profiles > li")
+		cards.Each(func(_ int, s *goquery.Selection) {
+			title := strings.TrimSpace(s.Find("h3 a").First().Text())
+			noticeHref, _ := s.Find("h3 a").First().Attr("href")
+			noticeURL := strings.TrimSpace(noticeHref)
+			if strings.HasPrefix(noticeURL, "/") {
+				noticeURL = "https://buy.nsw.gov.au" + noticeURL
+			}
+			noticeID := extractNswNoticeID(noticeURL)
+
+			fields := extractNswDetails(s)
+			agency := strings.TrimSpace(fields["agency"])
+			supplier := strings.TrimSpace(fields["contractor name"])
+			canID := strings.TrimSpace(fields["can id"])
+
+			publishDate := parseNswDate(fields["publish date"])
+			periodStart, periodEnd := parseNswContractPeriod(fields["contract period"])
+
+			amount := decimal.Zero
+			if rawAmt := fields["estimated amount payable to the contractor (including gst)"]; rawAmt != "" {
+				if parsed, err := parseMoneyToDecimal(rawAmt); err == nil {
+					amount = parsed
+				}
+			}
+
+			contractID := canID
+			if contractID == "" {
+				contractID = noticeID
+			}
+			if contractID == "" {
+				contractID = title
+			}
+			if contractID == "" {
+				return
+			}
+
+			mu.Lock()
+			if _, ok := seen[contractID]; ok {
+				mu.Unlock()
+				return
+			}
+			seen[contractID] = struct{}{}
+			mu.Unlock()
+
+			summary := MatchSummary{
+				Source:      nswSourceID,
+				ContractID:  contractID,
+				ReleaseID:   noticeID,
+				OCID:        contractID,
+				Supplier:    supplier,
+				Agency:      agency,
+				Title:       title,
+				Amount:      amount,
+				ReleaseDate: publishDate,
+			}
+
+			cbMu.Lock()
+			if req.OnAnyMatch != nil {
+				req.OnAnyMatch(summary)
+			}
+			cbMu.Unlock()
+
+			if !matchesSummaryFilters(req, summary, periodEnd) {
+				return
+			}
+			if !req.StartDate.IsZero() && !periodStart.IsZero() && periodStart.Before(req.StartDate) {
+				// keep conservative
+			}
+
+			cbMu.Lock()
+			if req.OnMatch != nil {
+				req.OnMatch(summary)
+			}
+			cbMu.Unlock()
+
+			mu.Lock()
+			*total = (*total).Add(summary.Amount)
+			mu.Unlock()
+		})
+
+		nextHref := strings.TrimSpace(doc.Find(".nsw-pagination__item--next-page a.nsw-direction-link.choose-page").First().AttrOr("href", ""))
+		if nextHref == "" {
+			break
+		}
+		if strings.HasPrefix(strings.ToLower(nextHref), "javascript:") {
+			break
+		}
+		baseURL, err := url.Parse(currentURL)
+		if err != nil {
+			break
+		}
+		refURL, err := url.Parse(nextHref)
+		if err != nil {
+			break
+		}
+		currentURL = baseURL.ResolveReference(refURL).String()
+	}
+	return nil
 }
 
 //go:nocover

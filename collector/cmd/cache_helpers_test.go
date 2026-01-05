@@ -79,3 +79,27 @@ func TestSplitDateWindows(t *testing.T) {
 	require.Equal(t, start.AddDate(0, 0, 31), windows[0].end)
 	require.Equal(t, end, windows[1].end)
 }
+
+func TestSplitDateWindowsByMonth(t *testing.T) {
+	t.Run("partial months", func(t *testing.T) {
+		start := time.Date(2024, time.January, 15, 13, 0, 0, 0, time.UTC)
+		end := time.Date(2024, time.March, 2, 9, 0, 0, 0, time.UTC)
+		windows := splitDateWindowsByMonth(start, end)
+		require.Len(t, windows, 3)
+		require.Equal(t, time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC), windows[0].start)
+		require.Equal(t, time.Date(2024, time.January, 31, 0, 0, 0, 0, time.UTC), windows[0].end)
+		require.Equal(t, time.Date(2024, time.February, 1, 0, 0, 0, 0, time.UTC), windows[1].start)
+		require.Equal(t, time.Date(2024, time.February, 29, 0, 0, 0, 0, time.UTC), windows[1].end) // leap year
+		require.Equal(t, time.Date(2024, time.March, 1, 0, 0, 0, 0, time.UTC), windows[2].start)
+		require.Equal(t, time.Date(2024, time.March, 2, 0, 0, 0, 0, time.UTC), windows[2].end)
+	})
+
+	t.Run("single day", func(t *testing.T) {
+		start := time.Date(2024, time.July, 10, 1, 2, 3, 0, time.UTC)
+		end := time.Date(2024, time.July, 10, 23, 59, 59, 0, time.UTC)
+		windows := splitDateWindowsByMonth(start, end)
+		require.Len(t, windows, 1)
+		require.Equal(t, time.Date(2024, time.July, 10, 0, 0, 0, 0, time.UTC), windows[0].start)
+		require.Equal(t, time.Date(2024, time.July, 10, 0, 0, 0, 0, time.UTC), windows[0].end)
+	})
+}

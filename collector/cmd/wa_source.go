@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -62,11 +64,24 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 
 	total := decimal.Zero
 	seen := make(map[string]struct{})
-	var currentSupplier string
+	var totalsMu sync.Mutex
+
+	maxConc := resolveMaxConcurrency()
+	if maxConc < 1 {
+		maxConc = 1
+	}
 
 	c := colly.NewCollector(
 		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+		colly.Async(true),
 	)
+	_ = c.Limit(&colly.LimitRule{DomainGlob: "*tenders.wa.gov.au*", Parallelism: maxConc, RandomDelay: 300 * time.Millisecond})
+
+	c.OnRequest(func(r *colly.Request) {
+		if ctx != nil && ctx.Err() != nil {
+			r.Abort()
+		}
+	})
 
 	c.OnHTML("#contractTable tbody tr", func(e *colly.HTMLElement) {
 		ref := strings.TrimSpace(e.ChildText("td:nth-child(2)"))
@@ -74,9 +89,13 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 			return
 		}
 
+		totalsMu.Lock()
 		if _, ok := seen[ref]; ok {
+			totalsMu.Unlock()
 			return
 		}
+		seen[ref] = struct{}{}
+		totalsMu.Unlock()
 
 		title := strings.TrimSpace(e.ChildText("td:nth-child(3)"))
 		agency := strings.TrimSpace(e.ChildText("td:nth-child(4)"))
@@ -86,12 +105,13 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 			return
 		}
 
-		seen[ref] = struct{}{}
-
 		awardDateStr := strings.TrimSpace(e.ChildText("td:nth-child(5)"))
 		valueStr := strings.TrimSpace(e.ChildText("td:nth-child(7)"))
 
-		supplier := currentSupplier
+		supplier := strings.TrimSpace(e.Request.Ctx.Get("supplier"))
+		if supplier == "" {
+			supplier = "Various"
+		}
 		// Always try to get the exact supplier name from the detail page.
 		// This is necessary because:
 		// 1. The search results table doesn't show the supplier.
@@ -116,7 +136,9 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 
 		val, err := parseWaMoney(valueStr)
 		if err == nil {
+			totalsMu.Lock()
 			total = total.Add(val)
+			totalsMu.Unlock()
 		}
 
 		if req.OnMatch != nil {
@@ -158,18 +180,16 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		baseParams.Set("keywords", req.Company)
 	}
 
-	windows := splitDateWindows(startResolved, endResolved, maxWindowDays)
+	windows := splitDateWindowsByMonth(startResolved, endResolved)
 	if req.Verbose {
 		fmt.Printf("Searching %d date windows from %v to %v\n", len(windows), startResolved, endResolved)
 	}
 
+	// Track progress per submitted window request.
+	var completed atomic.Int32
+	totalJobs := 0
 	if len(suppliers) > 0 {
-		for i, s := range suppliers {
-			currentSupplier = s.Name
-			if req.OnProgress != nil {
-				req.OnProgress(i, len(suppliers))
-			}
-
+		for _, s := range suppliers {
 			// Filter suppliers by name if we searched by name
 			if supplierSearchTerm != "" {
 				isNumeric := regexp.MustCompile(`^[0-9\s]+$`).MatchString(supplierSearchTerm)
@@ -177,12 +197,55 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 					continue
 				}
 			}
-
 			for _, win := range windows {
 				if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
 					continue
 				}
+				totalJobs++
+			}
+		}
+	} else {
+		for _, win := range windows {
+			if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+				continue
+			}
+			totalJobs++
+		}
+		if totalJobs == 0 {
+			// Maintain progress contract for callers.
+			if req.OnProgress != nil {
+				req.OnProgress(1, 1)
+			}
+			return formatMoneyDecimal(decimal.Zero), nil
+		}
+	}
 
+	notifyProgress := func() {
+		if req.OnProgress != nil {
+			req.OnProgress(int(completed.Load()), totalJobs)
+		}
+	}
+	// Increment progress once a request is fully processed.
+	c.OnScraped(func(_ *colly.Response) {
+		completed.Add(1)
+		notifyProgress()
+	})
+
+	if len(suppliers) > 0 {
+		for _, s := range suppliers {
+			// Filter suppliers by name if we searched by name
+			if supplierSearchTerm != "" {
+				isNumeric := regexp.MustCompile(`^[0-9\s]+$`).MatchString(supplierSearchTerm)
+				if !isNumeric && !strings.Contains(strings.ToLower(s.Name), strings.ToLower(supplierSearchTerm)) {
+					continue
+				}
+			}
+			for _, win := range windows {
+				if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+					completed.Add(1)
+					notifyProgress()
+					continue
+				}
 				params := url.Values{}
 				for k, v := range baseParams {
 					params[k] = v
@@ -190,89 +253,46 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 				params.Set("bySupplierId", fmt.Sprintf("%d", s.ID))
 				params.Set("awardDateFromString", win.start.Format("02/01/2006"))
 				params.Set("awardDateToString", win.end.Format("02/01/2006"))
-
 				searchURL := fmt.Sprintf("%s?%s", waContractSearchURL, params.Encode())
 				if req.Verbose {
 					fmt.Printf("Visiting: %s\n", searchURL)
 				}
-				err := c.Visit(searchURL)
-				if err != nil {
+				cctx := colly.NewContext()
+				cctx.Put("supplier", s.Name)
+				if err := c.Request("GET", searchURL, nil, cctx, nil); err != nil {
+					// Request wasn't scheduled; treat as completed to avoid stalling progress.
+					completed.Add(1)
+					notifyProgress()
 					continue
 				}
 			}
 		}
-	} else if req.Agency != "" || req.Keyword != "" {
-		for i, s := range suppliers {
-			currentSupplier = s.Name
-			if req.OnProgress != nil {
-				req.OnProgress(i, len(suppliers))
-			}
-
-			// Filter suppliers by name if we searched by name
-			if supplierSearchTerm != "" {
-				isNumeric := regexp.MustCompile(`^[0-9\s]+$`).MatchString(supplierSearchTerm)
-				if !isNumeric && !strings.Contains(strings.ToLower(s.Name), strings.ToLower(supplierSearchTerm)) {
-					continue
-				}
-			}
-
-			for _, win := range windows {
-				if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
-					continue
-				}
-
-				params := url.Values{}
-				for k, v := range baseParams {
-					params[k] = v
-				}
-				params.Set("bySupplierId", fmt.Sprintf("%d", s.ID))
-				params.Set("awardDateFromString", win.start.Format("02/01/2006"))
-				params.Set("awardDateToString", win.end.Format("02/01/2006"))
-
-				searchURL := fmt.Sprintf("%s?%s", waContractSearchURL, params.Encode())
-				err := c.Visit(searchURL)
-				if err != nil {
-					continue
-				}
-			}
-		}
-	} else if req.Agency != "" || req.Keyword != "" {
-		// Search by agency or keyword only
-		currentSupplier = "Various"
-		for i, win := range windows {
+	} else {
+		// Search by agency or keyword only.
+		for _, win := range windows {
 			if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
-				if req.OnProgress != nil {
-					req.OnProgress(i+1, len(windows))
-				}
+				completed.Add(1)
+				notifyProgress()
 				continue
 			}
-
 			params := url.Values{}
 			for k, v := range baseParams {
 				params[k] = v
 			}
 			params.Set("awardDateFromString", win.start.Format("02/01/2006"))
 			params.Set("awardDateToString", win.end.Format("02/01/2006"))
-
 			searchURL := fmt.Sprintf("%s?%s", waContractSearchURL, params.Encode())
-			err := c.Visit(searchURL)
-			if err != nil {
+			cctx := colly.NewContext()
+			cctx.Put("supplier", "Various")
+			if err := c.Request("GET", searchURL, nil, cctx, nil); err != nil {
+				completed.Add(1)
+				notifyProgress()
 				continue
 			}
-
-			if req.OnProgress != nil {
-				req.OnProgress(i+1, len(windows))
-			}
 		}
 	}
 
-	if req.OnProgress != nil {
-		totalSuppliers := len(suppliers)
-		if totalSuppliers == 0 {
-			totalSuppliers = 1
-		}
-		req.OnProgress(totalSuppliers, totalSuppliers)
-	}
+	c.Wait()
 
 	return formatMoneyDecimal(total), nil
 }
