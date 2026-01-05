@@ -1,113 +1,84 @@
 [![codecov](https://codecov.io/gh/whatnick/austender_analyser/graph/badge.svg?token=YTBIHEQAZL)](https://codecov.io/gh/whatnick/austender_analyser)
-# Austender Summarizer
-There is always news around how much the government spends on contracting. However it is hard
-to find a quick summary of figures in a transparent manner without digging through Austender
-website, so public service report or relying on journalists' scraping skills.
+# Austender Analyser
 
-Serverless-first Go project that answers spend questions by organization/agency while persisting a reusable, partitioned Parquet lake for fast reuse.
+Serverless-first Go stack that scrapes Australian government contract data, persists it in an auditable Parquet lake, and serves spend summaries via APIs, MCP tools, and a minimal chat frontend.
 
 ![KPMG Tenders](docs/KPMG_result_2023_01_22.png)
 
-## Features
-- Collector CLI that scrapes OCDS releases and writes a partitioned Parquet lake with a SQLite catalog under `~/.cache/austender` (override via `AUSTENDER_CACHE_DIR`).
-- Multi-jurisdiction scraping via the `--source` flag with dedicated adapters for federal, NSW, VIC, SA, and WA tenders.
-- Month- and FY-partitioned lake layout (`fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>`); fetcher skips months already present in the lake to avoid re-downloading.
-- Server reuses collector logic and calls `RunSearchWithCache` by default, so API and MCP endpoints benefit from the lake and SQLite index.
-- Chat-style HTMX frontend hitting `/api/llm` with an MCP toggle.
-- Temporal aggregate spend on raw AUD values (not inflation adjusted).
-- Serverless-ready infra in AWS (CDK stack for Lambda + API Gateway + S3 + CloudFront).
+## Highlights
+- Collector CLI streams OCDS releases into a partitioned Parquet lake with a SQLite catalog under `~/.cache/austender` (override with `AUSTENDER_CACHE_DIR`).
+- Dedicated adapters for federal, NSW, VIC, SA, and WA portals selectable via `--source`; each run skips month partitions already present in the lake.
+- Server shares collector helpers, adds a same-day in-memory cache, and exposes REST, MCP, and LLM endpoints.
+- Chat-style HTMX frontend targets `/api/llm`, auto-detects available LLM backends (OpenAI or Ollama), and can attach MCP configs on demand.
+- Infrastructure-as-code stack (Go CDK) packages the API for Lambda+API Gateway and fronts the static site with S3+CloudFront.
 
+## Roadmap Snapshot
+- [x] Partitioned Parquet + SQLite lake with reindex command
+- [x] Dual-mode server (local HTTP + AWS Lambda)
+- [x] MCP-aware `/api/llm` agent that can call collector tools (jurisdiction detection, entity lookup, contract aggregation)
+- [x] Coverage harness via `task test:all` (collector, server, infra)
+- [ ] Scheduled ingestion to keep the lake warm
+- [ ] Production frontend pipeline (S3 upload + CloudFront invalidation)
+- [ ] Harden auth, rate limits, and performance tunables
 
-## Roadmap and Status
+## Repository Layout
+- `collector/` – Cobra CLI and shared scraping/cache logic reused by the server.
+- `server/` – HTTP handlers, Lambda entry, LLM agent loop, and MCP bridge.
+- `frontend/` – Static HTMX chat UI with MCP toggle and model picker.
+- `infra/` – Go CDK stack for Lambda, API Gateway, S3, and CloudFront.
+- `docs/` – Onboarding, testing strategy, and release notes.
+- `hack/` – Shell scripts mirroring Taskfile targets for environments without Task.
+- `Taskfile.yml` – Aggregates component Taskfiles and exposes repo-wide commands.
 
-- [x] Download one search result (e.g., KPMG) and verify totals (see docs image)
-- [x] Basic web server API to serve results for a keyword: POST `/api/scrape` -> `{ result: "$X.XX" }`
-- [x] Dual-mode server: local HTTP and AWS Lambda (API Gateway proxy) sharing the same scrape logic
-- [x] Initial tests: server unit tests and infra assertions; helper scripts in `hack/`
-- [x] Go multi-module layout (collector, server, infra) with direct reuse of collector in server
-- [x] CI workflow to run tests across all components via `hack/test-all.sh`
-- [x] Partitioned Parquet lake + SQLite catalog with month-level skip logic and reindex command
-- [ ] Scheduled ingestion/cron to keep the lake warm
-- [ ] Fuzzy name matching ("did you mean")
-- [ ] Frontend build/deploy pipeline (upload to S3, CloudFront invalidation) and richer UI
-- [ ] Performance, rate limiting, CORS, and basic auth hardening
+## Getting Started
+Prerequisites: Go 1.25+, a browser, and optionally [Task](https://taskfile.dev/#/installation). AWS credentials are only required for infra work or Lambda deploys.
 
-Reference: https://github.com/golang-standards/project-layout
+### Common Tasks (via Taskfile)
+- Start API server on :8080: `task run:server`
+- Launch chat frontend (assumes local API): `task run:frontend`
+- Run both server + frontend helpers: `task run:local`
+- Execute tests with coverage for all modules: `task test:all`
+- Build collector binary into `dist/collector`: `task collector:build`
+- Prime the Parquet lake and refresh catalog: `task collector:prime-lake -- --lookback-period 5`
 
-## Folder Structure
+### Shell Equivalents
+- `bash hack/run-server.sh`
+- `bash hack/run-frontend.sh`
+- `bash hack/run-local.sh`
+- `bash hack/build-collector.sh`
+- `bash hack/prime-datalake.sh --lookback-period 5`
 
-The repository is organized as follows:
+### Collector CLI Cheat Sheet
+- Run ad-hoc scrape: `cd collector && go run . --k KPMG`
+- Filter by company or agency: add `--c <company>` or `--d <agency>`
+- Switch jurisdiction: append `--source federal|nsw|vic|sa|wa`
+- Control date window: `--start-date YYYY-MM-DD`, `--end-date YYYY-MM-DD`, `--date-type contractPublished|contractStart|contractEnd|contractLastModified`
+- Override lookback when no start provided: `--lookback-period <years>` (defaults to 20 or `AUSTENDER_LOOKBACK_PERIOD`)
 
-- `collector/` – CLI and shared scraping logic; writes/reads the Parquet lake and SQLite catalog.
-- `server/` – HTTP + Lambda entry that imports collector and defaults to cached lookups.
-- `frontend/` – Static HTMX chat page with MCP toggle.
-- `infra/` – AWS CDK stack for Lambda, API Gateway, S3, and CloudFront.
-- `docs/` – Onboarding and screenshots.
-- `hack/` – Helper scripts (`run-*`, `build-collector.sh`, `prime-datalake.sh`).
-- `Taskfile.yml` – Aggregates component Taskfiles (collector/server/infra) and adds `collector:prime-lake` / `collector:build` convenience tasks.
+### API Quick Tests
+- `POST http://localhost:8080/api/scrape` with `{ "keyword": "KPMG" }` → `{ "result": "$X.XX" }`
+- `POST http://localhost:8080/api/llm` with `{ "prompt": "How much was spent by Department of Defence?" }` → agent-driven answer; include `"source": "nsw"` or `"mcpConfig": {...}` as needed
+- `GET http://localhost:8080/api/llm/models` → available model list and active backend metadata
+- `POST http://localhost:8080/api/mcp` → invoke typed MCP tools programmatically (see `server/mcp_server.go`)
 
-Other files:
-- `LICENSE.md` - License information.
-- `Taskfile.yml` - Project-wide task automation.
+### Frontend Notes
+- Open `frontend/index.html` directly or via `task run:frontend`
+- Toggle **Enable MCP backend** to pass the config from `frontend/config.local.js`
+- Status banner reflects detected backend (`openai` vs `ollama`) and surfaces model picker when Ollama is reachable
 
-## How to run locally
+## Testing & Coverage
+- `task test:all` runs module tests with coverage and merges profiles into `coverage/combined.out`
+- Individual modules: `task collector:test`, `task server:test`, `task infra:test`
+- Inspect coverage: `go tool cover -html=coverage/combined.out`
 
-Prereqs: Go 1.25+, a browser. Optional: Task (https://taskfile.dev/#/installation).
+## Architecture Overview
+- Collector streams OCDS releases into a lake partitioned by FY/month/agency/company; concurrent runs skip existing month partitions. Cache lives under `~/.cache/austender` unless overridden.
+- Server normalizes requests into `collector.SearchRequest`, layers a same-day in-memory cache on top of the lake, and powers REST + MCP + LLM endpoints with consistent behavior.
+- LLM handler wraps langchaingo, supports OpenAI and Ollama backends, and runs an internal tool-using agent capable of jurisdiction detection, catalog lookup, and contract aggregation.
+- Frontend is static HTMX + Bootstrap; no build tooling required.
+- Infra CDK stack provisions Lambda/API Gateway for the server, S3 bucket for the static assets, and CloudFront distribution secured via Origin Access Control.
 
-- With Task (recommended):
-    - Start API server: `task run:server`
-    - Open frontend: `task run:frontend`
-    - Start both: `task run:local`
-    - Run all tests: `task test:all`
-    - Build collector: `task collector:build`
-    - Prime lake + reindex: `task collector:prime-lake -- --lookback-period 5` (filters optional; keyword/company/agency all optional)
-    - Target a specific jurisdiction: append `--source <federal|nsw|sa|vic|wa>` to any collector command (defaults to federal).
-
-- With plain scripts:
-    - Start API server (localhost:8080): `bash hack/run-server.sh`
-    - Open the minimal frontend: `bash hack/run-frontend.sh`
-    - Start both: `bash hack/run-local.sh`
-    - Build collector: `bash hack/build-collector.sh`
-    - Prime lake + reindex: `bash hack/prime-datalake.sh --lookback-period 5` (filters optional)
-    - Target a specific jurisdiction: pass `--source <federal|nsw|sa|vic|wa>` to `go run .` or the shell helpers.
-
-API quick test (without frontend):
-- POST to `http://localhost:8080/api/scrape` with JSON body `{"keyword":"KPMG"}`; response is `{ "result": "$X.XX" }`. Leave `keyword` empty to prime cache ranges.
-
-LLM/MCP quick test:
-- POST to `http://localhost:8080/api/llm` with `{ "prompt": "How much was spent by Department of Defence?" }`. Attach `mcpConfig` JSON to allow the model (or your agent tooling) to call tools.
-
-### MCP-friendly chat frontend
-
-- Open `frontend/index.html` (or run `task run:frontend`) and use the chat box to ask spend questions.
-- Toggle “Enable MCP backend” to attach the MCP config from `frontend/config.local.js` to `/api/llm` calls.
-
-### Architecture (high level)
-- Collector fetches OCDS releases by date windows, writes all matches (not just filtered ones) into a Parquet lake partitioned by FY/month/agency/company, and maintains a SQLite catalog. Windows with existing month partitions are skipped.
-    - The CLI exposes dedicated sources for federal Austender plus NSW, VIC, SA, and WA procurement portals via the `--source` flag.
-- Server imports collector and uses `RunSearchWithCache` by default for `/api/scrape`, so API calls leverage the lake without re-scraping.
-- Frontend is a static HTMX chat page posting to `/api/llm` with an MCP toggle; MCP config allows downstream agents to call tools.
-- Infra packages the server for Lambda/API Gateway and serves the static frontend via S3/CloudFront.
-
-### Taskfile setup
-
-- Root `Taskfile.yml` aggregates per-component Taskfiles via `includes`.
-- Useful targets:
-    - `task test:all` – runs tests across collector, server, infra.
-    - `task run:server` – starts local API on :8080.
-    - `task run:frontend` – opens the HTMX page.
-    - `task run:local` – runs both.
-- Component Taskfiles:
-    - `collector/Taskfile.yml`: `task collector:test`, `task collector:tidy`.
-    - `server/Taskfile.yml`: `task server:test`, `task server:build`, `task server:fastdeploy`.
-    - `infra/Taskfile.yml`: `task infra:test`, `task infra:synth`, `task infra:deploy`, `task infra:destroy`.
-
-## Allied MCP ideas for spend analysis
-
-These MCPs pair well with the Austender tools to broaden government spend context:
-
-- OpenSpending / Government Expenditure MCP: query consolidated budget or COFOG-classified spend datasets (e.g., GIFT/OKFN catalogs).
-- USAspending MCP: pull US federal contract and assistance obligations for cross-jurisdiction comparisons.
-- EU TED/Open Procurement MCP: fetch EU tender awards to benchmark vendor exposure across regions.
-- Open Contracting Data Standard (OCDS) Registry MCP: discover and pull published OCDS releases from other jurisdictions for side-by-side analysis.
-- Data.gov.au Budget/PAES MCP: surface Australian budget paper line items to compare appropriations vs. awarded contract spend.
+## Related MCP Ideas
+- OpenSpending / gov expenditure catalogs for complementary budget data
+- USAspending, EU TED, or OCDS Registry MCPs for cross-jurisdiction comparisons
+- Data.gov.au Budget/PAES MCP for juxtaposing appropriations vs contract spend

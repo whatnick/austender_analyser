@@ -1,24 +1,32 @@
 # Server
 
-Go HTTP + Lambda entrypoint that fronts the collector search helpers and exposes LLM + MCP surfaces.
+Go HTTP + Lambda entrypoint that wraps collector helpers, layers a same-day in-memory cache, exposes MCP tools, and runs an LLM-backed agent for spend analysis.
 
 ## Endpoints
-- `POST /api/scrape` – `{ "keyword": "KPMG" }` -> `{ "result": "$X.XX" }` using collector search helpers.
-- `POST /api/llm` – `{ "prompt": "How much was spent by Department of Defence?", "mcpConfig": { ... } }`.
-  - `mcpConfig` (optional) is forwarded so downstream agents can call tools defined in `mcp_server.go`.
-- `GET /api/llm/models` – Lists available LLM models and the active backend (`openai` or `ollama`).
-- `POST /api/mcp` – MCP tool surface for agents (see `mcp_server.go`).
+- `POST /api/scrape` – accepts `ScrapeRequest` (`keyword`, optional `company`, `agency`, `source`, date fields, and `lookbackPeriod`) and returns `{ "result": "$X.XX" }`.
+- `POST /api/llm` – accepts `LLMRequest` (`prompt`, optional `model`, `source`, `lookbackPeriod`, `useCache`, `mcpConfig`). Runs an agent that can call collector tools (jurisdiction detection, catalog lookup, contract aggregation). Falls back to single-prompt completion on agent failure.
+- `GET /api/llm/models` – exposes active backend (`openai` or `ollama`), default model, and selectable alternatives.
+- `POST /api/mcp` – serves typed MCP tools defined in `mcp_server.go` for external agents.
 
-## Running locally
-- `task run:server` (recommended) or `bash hack/run-server.sh` from repo root. Defaults to `:8080`.
-- Env `AUSTENDER_MODE=local` (default) runs the HTTP server; `AUSTENDER_MODE=lambda` uses API Gateway proxy handler.
+All routes honour CORS preflight (`OPTIONS`). `/api/scrape` and `/api/llm` sit behind the same Parquet-backed cache to avoid redundant scraping.
 
-## Tests
-- From this directory: `go test ./...`
-- Root `task test:all` covers this module.
+## Running Locally
+- `task run:server` (or `bash ../hack/run-server.sh`) starts the HTTP server on `:8080`.
+- `AUSTENDER_MODE=local` (default) starts the HTTP server; `AUSTENDER_MODE=lambda` exposes the API Gateway proxy handler for Lambda.
+- `task server:build` cross-compiles `dist/main.zip` for deployment.
 
-## Notes
-- `llm_handler.go` handles prompt wiring and optional MCP config attachment.
-- `mcp_server.go` keeps typed tools in sync with collector helpers; avoid drift when changing request/response structs.
-- Lambda builds use `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` (`task server:build`).
-- If `OPENAI_API_KEY` is present the server prefers OpenAI regardless of `OLLAMA_HOST`. Set `OLLAMA_HOST` (plus `OLLAMA_DEFAULT_MODEL` if desired) to surface local models when OpenAI is unavailable. Prefix a requested model with `ollama:` or `openai:` to force a specific backend per-request.
+## Key Environment Variables
+- `OPENAI_API_KEY` – enables OpenAI backend (preferred when set).
+- `OLLAMA_HOST` – enables Ollama backend and model picker; set alongside optional `OLLAMA_DEFAULT_MODEL` and `OLLAMA_SYSTEM_PROMPT`.
+- `AUSTENDER_CACHE_DIR`, `AUSTENDER_CACHE_TZ` – passed to collector helpers and same-day cache utilities.
+- `AUSTENDER_MCP_CONFIG` – default MCP config JSON injected into `/api/llm` requests when present.
+
+## Testing
+- Run module tests with coverage: `task server:test`
+- Repo-wide coverage (collector + server + infra): `task test:all`
+
+## Implementation Notes
+- `api.go` owns HTTP routing, daily in-memory cache, and request validation shared by local and Lambda modes.
+- `llm_handler.go` selects backend (`openai` vs `ollama`), executes the tool-using agent loop, and gracefully falls back to vanilla completion.
+- `mcp_server.go` stays aligned with collector helpers; update both when request/response structs evolve.
+- Lambda builds use `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`; deploy via `task server:fastdeploy` once the SSM parameter `austender` points to the target function name.

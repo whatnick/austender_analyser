@@ -1,23 +1,31 @@
 # Collector
-- CLI Tool built on [colly](http://go-colly.org/)
-- Shared scraping and cache logic imported by the server
-- Multi-source scraping via the `--source` flag (federal default) with dedicated adapters for NSW, VIC, SA, and WA portals.
 
-## Roadmap
-- Go Testing , target coverage 80%
-- GitHub actions, target publish multiplatform binaries
-- Refactor and packages with high level code only in main
+Colly-powered CLI used for scraping Austender (federal) and state procurement portals, priming the Parquet lake, and exposing reusable helpers for the server.
 
-## Local datalake cache
-- `collector cache` (and the default `austender` root command) write to a partitioned Parquet lake under `~/.cache/austender/lake/fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>` and index files in `catalog.sqlite` for fast discovery. Keyword is optional; running without filters will hydrate the lake for the date window.
-- All valued releases stream into the lake via `OnAnyMatch`, even when filters are provided, so the cache remains complete.
-- Fetcher skips month windows that already have parquet files in the lake to avoid re-downloading.
-- Environment: `AUSTENDER_CACHE_DIR` overrides the lake root; `AUSTENDER_USE_CACHE=false` bypasses cache.
-- If the catalog drifts from on-disk files, run `collector reindex-lake --cache-dir <dir>` to rescan the lake and rebuild `parquet_files`.
+## Capabilities
+- Streams OCDS releases into `~/.cache/austender/lake/fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>` with metadata tracked in `catalog.sqlite`.
+- Supports keyword (`--k`), company (`--c`), agency (`--d`), and jurisdiction (`--source federal|nsw|vic|sa|wa`) filters. Filters are optional when priming the cache.
+- Implements skip logic to avoid re-fetching month partitions already present in the lake.
+- Provides reindexing (`reindex-lake`) to reconcile the catalog with on-disk Parquet files.
+- Exports helpers such as `RunSearchWithCache`, jurisdiction detection, and catalog lookups for server reuse.
 
-## Useful commands
-- Prime lake and reindex (Task): `task collector:prime-lake -- --lookback-period 5` (filters optional; keyword/company/agency empty hydrates everything in window)
-- Prime lake and reindex (shell): `bash ../hack/prime-datalake.sh --lookback-period 5`
-- Build binary: `task collector:build` or `bash ../hack/build-collector.sh`
-- Query with cache: `go run . cache --keyword KPMG` (all filters optional)
-- Target another jurisdiction: append `--source <federal|nsw|sa|vic|wa>` to collector commands.
+## Commands
+- `go run . --k KPMG` – aggregate spend using keyword match (defaults to 20-year lookback when start date omitted).
+- `go run . --c Accenture --source nsw` – constrain to company + jurisdiction.
+- `go run . cache --lookback-period 5` – hydrate the cache across five years before re-running `reindex-lake` automatically (used by `task collector:prime-lake`).
+- `go run . reindex-lake --cache-dir <path>` – rebuild `catalog.sqlite` when files change out of band.
+
+## Environment Variables
+- `AUSTENDER_CACHE_DIR` – override cache root (defaults to `~/.cache/austender`).
+- `AUSTENDER_USE_CACHE=false` – bypass Parquet/SQLite cache and scrape directly (mostly for debugging).
+- `AUSTENDER_LOOKBACK_PERIOD` – default year window when no start date is supplied (falls back to 20).
+
+## Build & Test
+- Build binary into repo `dist/collector`: `task collector:build`
+- Run tests with coverage: `task collector:test`
+- Lint/go mod tidy: `task collector:tidy`
+
+## Notes
+- The CLI’s root command mirrors `collector cache` semantics. When no filters are supplied it hydrates the entire date window to keep the cache broad.
+- Long flag names follow the single-letter IDs (`--k`, `--c`, `--d`); Cobra does not expose extended aliases today.
+- Server requests flow through the same `RunSearchWithCache` code path, so changes here propagate to `/api/scrape` and the LLM agent automatically.

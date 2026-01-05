@@ -1,59 +1,54 @@
 # Austender Analyser Onboarding
 
-Welcome to the Austender Analyser project. This document captures the essentials you need to get productive quickly and explains how the main pieces in this mono-repo fit together.
+Welcome to the Austender Analyser mono-repo. This guide summarises how the pieces fit together and the quickest paths to productivity.
 
-## What This Repo Does
+## What the Project Delivers
+- Answers “how much has the government spent with <keyword>?” by scraping [Austender](https://www.tenders.gov.au) and aligned state portals (NSW, VIC, SA, WA).
+- Provides a Go CLI (`collector`) for scraping and cache priming, a Go HTTP/Lambda server (`server`) for REST + MCP + LLM access, and Go CDK infrastructure (`infra`) to deploy the stack.
+- Ships a minimal HTMX frontend (`frontend`) that exercises `/api/llm`, auto-detects LLM backends, and can attach MCP configurations.
+- Maintains a Parquet lake + SQLite catalog under `~/.cache/austender`, partitioned by FY/month/agency/company. Runs skip month partitions already present and keep keyword/company/agency filters optional for broad warming.
+- Layers a same-day in-memory cache inside the server on top of the Parquet lake, so repeated questions avoid redundant scrapes.
 
-- Answers “how much has the government spent with <keyword>?” by scraping [Austender](https://www.tenders.gov.au) and summarising the totals across federal, NSW, VIC, SA, and WA procurement portals.
-- Provides a Go CLI (`collector`) for ad-hoc scraping, a Go HTTP/Lambda server (`server`) for API access, and AWS CDK IaC (`infra`) to deploy everything serverlessly.
-- Ships a minimal HTMX frontend (`frontend`) that hits `POST /api/llm` for quick demos, with an MCP toggle.
-- Maintains a local Parquet lake + SQLite catalog under `~/.cache/austender`, partitioned by FY/month/agency/company, with skip logic to avoid re-downloading months already present; keyword/company/agency filters stay optional when priming so you can warm the cache broadly.
-
-## Architecture at a Glance
-
-- **Collector (`collector/`)** – Colly-based scraper + Cobra CLI. Exposes the scraping logic that the server imports via `github.com/whatnick/austender_analyser/collector`. Writes all valued releases into the Parquet lake, skips already-populated month partitions, and treats keyword/company/agency filters as optional for priming runs. Dedicated source adapters are available for federal, NSW, VIC, SA, and WA via the `--source` flag (default federal).
-- **Server (`server/`)** – HTTP handlers and `aws-lambda-go` proxy entry point. `AUSTENDER_MODE=local` runs an HTTP server on `:8080`; `AUSTENDER_MODE=lambda` serves API Gateway. Defaults to `RunSearchWithCache` so API/MCP calls leverage the lake.
-- **Infra (`infra/`)** – Go CDK stack that builds Lambda, API Gateway, S3 (static frontend), and CloudFront distribution. Uses `cdk.json` for context, default region `ap-southeast-1`.
-- **Frontend (`frontend/`)** – Static HTML/HTMX page plus `config.local.js` to point to `http://localhost:8080`; supports MCP toggle to `/api/llm`.
-- **Hack scripts (`hack/`)** – Convenience shell scripts mirroring Task targets for local dev and CI (`hack/run-local.sh`, `hack/test-all.sh`, etc.).
+## Architecture Snapshot
+- **collector/** – Colly-based scraper and Cobra CLI. Exposes helpers consumed by the server (`github.com/whatnick/austender_analyser/collector`). Dedicated adapters for each jurisdiction via `--source` (defaults to federal).
+- **server/** – HTTP handlers, AWS Lambda proxy, LLM agent loop, and MCP bridge. `AUSTENDER_MODE=local` runs :8080; `AUSTENDER_MODE=lambda` exposes the API Gateway handler. All `/api/scrape` calls use the Parquet-backed cache by default.
+- **infra/** – Go CDK stack that builds the Lambda, API Gateway, S3 bucket for static assets, and CloudFront distribution with Origin Access Control.
+- **frontend/** – Static HTML/HTMX UI with Bootstrap styling, Ollama model picker, and MCP toggle powered by `config.local.js`.
+- **hack/** – Shell scripts mirroring Task targets for environments that cannot install Task.
 
 ## Daily Driver Commands
-
-Prereqs: Go 1.25+, Taskfile (<https://taskfile.dev/#/installation>) or Bash + GNU tools, AWS CLI + CDK for infra work.
+Prereqs: Go 1.25+, Task (<https://taskfile.dev/#/installation>) or Bash + GNU tools. AWS CLI + CDK are only needed for infra work.
 
 | Action | Taskfile | Shell Script |
 | --- | --- | --- |
 | Run API locally | `task run:server` | `bash hack/run-server.sh` |
 | Open frontend | `task run:frontend` | `bash hack/run-frontend.sh` |
-| Run both | `task run:local` | `bash hack/run-local.sh` |
-| Run all tests | `task test:all` | `bash hack/test-all.sh` |
-| Collector CLI | `task collector:run -- --keyword KPMG` | `cd collector && go run . --keyword KPMG` |
+| Run both helpers | `task run:local` | `bash hack/run-local.sh` |
+| Run tests + merged coverage | `task test:all` | `bash hack/test-all.sh` |
+| Collector CLI | `task collector:run -- --k KPMG` | `cd collector && go run . --k KPMG` |
 | Prime cache/lake | `task collector:prime-lake -- --lookback-period 5` | `bash hack/prime-datalake.sh --lookback-period 5` |
 | Build collector | `task collector:build` | `bash hack/build-collector.sh` |
 | Server tests | `task server:test` | `bash hack/test-server.sh` |
 | Infra synth/deploy | `task infra:synth` / `task infra:deploy` | `cd infra && cdk synth|deploy` |
 
-Add `--source <federal|nsw|sa|vic|wa>` to collector commands to target a specific jurisdiction; omit to scrape the federal portal.
+Add `--source federal|nsw|vic|sa|wa` to collector commands to target a specific jurisdiction. `--c` filters by company, `--d` by agency, and `--k` by keyword. Date filters use `--start-date`, `--end-date`, and `--date-type` (defaults to `contractPublished`).
 
 ## Development Workflow
-
-1. **Scraping logic**: build/modify functionality in `collector/` first. Keep exported helpers clean so the server can reuse them without duplication.
-2. **API layer**: wire new inputs/outputs in `server/api.go` and ensure both the HTTP handler and `HandleLambdaRequest` stay in sync.
-3. **Frontend tweaks**: update `frontend/index.html` or swap to a richer UI. Point to alternate hosts via `frontend/config.local.js`.
-4. **Testing**: rely on Go unit tests (`go test ./...`) in each module. Use `task test:all` before pushing; CI mirrors that script.
-5. **Infra changes**: modify `infra/infra.go`, run `task infra:synth` to validate, then `task infra:deploy --require-approval never` (already encoded) when ready.
+1. Shape scraping logic in `collector/` first so both CLI and server reuse it.
+2. Mirror request validation between `server/api.go` (HTTP) and the Lambda entry to keep parity.
+3. Keep `frontend/index.html` static; tweak behaviour via HTMX/JS and adjust hosts in `frontend/config.local.js`.
+4. Run `task test:all` (or module-specific tests) before pushing; CI calls the same script and merges coverage into `coverage/combined.out`.
+5. When adjusting infra, update `infra/infra.go`, validate with `task infra:synth`, then deploy via `task infra:deploy` after confirming AWS credentials/region.
 
 ## Deployment Notes
+- `task server:build` cross-compiles the Lambda binary (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`) and writes `dist/main.zip`.
+- `task server:fastdeploy` expects an SSM parameter named `austender` containing the Lambda function name before calling `aws lambda update-function-code`.
+- Infra defaults to region `ap-southeast-1`. Override `AWS_DEFAULT_REGION`/`CDK_DEFAULT_REGION` as needed; `CDK_DEFAULT_ACCOUNT` is auto-detected when AWS CLI credentials exist.
 
-- `server/Taskfile.yml` bundles a `build` target that cross-compiles for Lambda (`GOOS=linux`, `GOARCH=amd64`) and zips to `dist/main.zip`.
-- `task server:fastdeploy` queries SSM parameter `austender` for the Lambda function name and calls `aws lambda update-function-code`—ensure the parameter exists in the target account.
-- Infra stack expects default AWS account/region from `aws sts get-caller-identity` and `ap-southeast-1`. Export/override `AWS_DEFAULT_REGION` and `CDK_DEFAULT_REGION` if needed.
+## Contribution Tips
+- Share logic through `collector/` to avoid divergence between CLI and server code paths.
+- Favour deterministic tests (stub HTTP, avoid hitting live portals). Use table-driven cases for date window, cache, and catalog helpers.
+- Update relevant Taskfiles and docs whenever new commands or workflows ship.
+- Run `go fmt` and module tests before opening PRs; CI runs `hack/test-all.sh` for validation.
 
-## Copilot & Contribution Tips
-
-- Keep code modular: any shared logic between CLI and server should live in the collector module so the server imports it rather than duplicating.
-- Preserve deterministic tests by stubbing HTTP responses where possible; avoid hitting Austender in unit tests to keep CI reliable.
-- Document new commands in the relevant `Taskfile.yml` and update this onboarding doc when workflows change.
-- Run `go fmt` + `go test ./...` in the touched module(s) before submitting PRs; CI enforces `hack/test-all.sh`.
-
-With these basics in place, you should be productive quickly whether you are improving the scraper, enhancing the API, or working on infra.
+With this primer you should be ready to improve the scraper, extend the API/agent, or evolve the infrastructure.
