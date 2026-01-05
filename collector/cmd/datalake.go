@@ -29,29 +29,35 @@ func newDataLake(baseDir string, db *sql.DB) *dataLake {
 }
 
 func (l *dataLake) ensureSchema() error {
-	const schema = `
-    CREATE TABLE IF NOT EXISTS parquet_files (
-        path TEXT PRIMARY KEY,
-		source TEXT NOT NULL,
-        fy TEXT NOT NULL,
-        agency_key TEXT NOT NULL,
-		agency_name TEXT NOT NULL,
-        company_key TEXT NOT NULL,
-		company_name TEXT NOT NULL,
-        row_count INTEGER NOT NULL,
-        created_at TEXT NOT NULL
-    );
-	CREATE INDEX IF NOT EXISTS idx_parquet_files_keys ON parquet_files(source, fy, agency_key, company_key);
-	CREATE INDEX IF NOT EXISTS idx_parquet_files_agency_name ON parquet_files(source, agency_name);
-	CREATE INDEX IF NOT EXISTS idx_parquet_files_company_name ON parquet_files(source, company_name);
-    `
-	if _, err := l.db.Exec(schema); err != nil {
+	// Keep schema migrations resilient: older catalogs may have a parquet_files table
+	// without newer columns. Create the table if missing, then add columns, then add
+	// indexes that depend on those columns.
+	const createTable = `
+		CREATE TABLE IF NOT EXISTS parquet_files (
+			path TEXT PRIMARY KEY,
+			source TEXT NOT NULL,
+			fy TEXT NOT NULL,
+			agency_key TEXT NOT NULL,
+			agency_name TEXT NOT NULL,
+			company_key TEXT NOT NULL,
+			company_name TEXT NOT NULL,
+			row_count INTEGER NOT NULL,
+			created_at TEXT NOT NULL
+		);
+	`
+	if _, err := l.db.Exec(createTable); err != nil {
 		return err
 	}
-	// Legacy catalogs might miss the source column; add it with a default when absent.
+
+	// Best-effort migrations; ignore "duplicate column" errors.
 	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN source TEXT NOT NULL DEFAULT 'federal'")
 	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN agency_name TEXT NOT NULL DEFAULT ''")
 	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN company_name TEXT NOT NULL DEFAULT ''")
+
+	// Indexes (safe after columns exist).
+	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_keys ON parquet_files(source, fy, agency_key, company_key)")
+	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_agency_name ON parquet_files(source, agency_name)")
+	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_company_name ON parquet_files(source, company_name)")
 	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_source ON parquet_files(source)")
 	return nil
 }

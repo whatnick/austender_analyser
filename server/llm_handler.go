@@ -39,6 +39,9 @@ var generateFromPrompt = func(ctx context.Context, client llms.Model, prompt str
 	return llms.GenerateFromSinglePrompt(ctx, client, prompt)
 }
 
+// runSearchWithCache is overridable in tests.
+var runSearchWithCache = collector.RunSearchWithCache
+
 // llmHandler accepts plain-text prompts and optional MCP server config to give the LLM
 // more structured context. It relies on langchaingo so any supported backend can be
 // swapped by changing the model name and env credentials (e.g., OpenAI-compatible APIs).
@@ -71,8 +74,6 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maybePrefetchPrompt(req.Prompt, strings.TrimSpace(req.Source), lookback, useCache)
-
 	modelName, backendOverride, err := resolveModelName(strings.TrimSpace(req.Model))
 	if err != nil {
 		sendJSONError(w, err.Error(), http.StatusBadRequest)
@@ -81,6 +82,14 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 
 	mcpContext := strings.TrimSpace(string(req.MCPConfig))
 	basePrompt := req.Prompt
+
+	var prefetchedContext string
+	// If the prompt looks like a spend query, prefetch using the collector cache
+	// and inject context.
+	if pre, err := maybePrefetchSpend(r.Context(), req.Prompt, strings.TrimSpace(req.Source), lookback); err == nil && pre != "" {
+		prefetchedContext = pre
+		basePrompt = pre + "\n\n" + basePrompt
+	}
 
 	client, err := newLLMClient(modelName, backendOverride)
 	if err != nil {
@@ -127,22 +136,98 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(LLMResponse{Result: resp})
+	json.NewEncoder(w).Encode(LLMResponse{Result: resp, Context: prefetchedContext})
+}
+
+// Patterns:
+// 1) "how much did {agency} spend on {company}"
+// 2) "how much was spent on {company} by {agency}" (agency optional)
+// 3) "how much was spent by {agency}" (agency only)
+// 4) "how much did {agency} spend" (agency only)
+var (
+	spendAgencyRe     = regexp.MustCompile(`(?i)how\s+much\s+did\s+(.+?)\s+spend\s+on\s+([\w\s&\-\.]+)\s*\??\s*$`)           // agency, company
+	spendOnRe         = regexp.MustCompile(`(?i)how\s+much\s+was\s+spent\s+on\s+([\w\s&\-\.]+)(?:\s+by\s+(.+?))?\s*\??\s*$`) // company, optional agency
+	spendByAgencyRe   = regexp.MustCompile(`(?i)how\s+much\s+was\s+spent\s+by\s+(.+?)\s*\??\s*$`)                            // agency only
+	spendAgencyOnlyRe = regexp.MustCompile(`(?i)how\s+much\s+did\s+(.+?)\s+spend\s*\??\s*$`)                                 // agency only
+)
+
+// maybePrefetchSpend tries to answer spend questions by querying the collector
+// cache and injecting the result.
+func maybePrefetchSpend(ctx context.Context, prompt, sourceHint string, lookback int) (string, error) {
+	company, agency := parseSpendQuery(prompt)
+	if company == "" && agency == "" {
+		return "", nil
+	}
+	if lookback <= 0 {
+		lookback = 20
+	}
+	source := strings.TrimSpace(sourceHint)
+	if source != "" {
+		source = collector.CanonicalSourceID(source)
+	}
+	req := collector.SearchRequest{
+		Company:        company,
+		Agency:         agency,
+		Source:         source,
+		LookbackPeriod: lookback,
+	}
+	res, _, err := runSearchWithCache(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	scope := ""
+	if strings.TrimSpace(source) != "" {
+		scope = fmt.Sprintf(" (%s)", strings.ToUpper(source))
+	}
+	parts := []string{fmt.Sprintf("Prefetched spend%s over the last %d years: %s", scope, lookback, res)}
+	if company != "" {
+		parts = append(parts, fmt.Sprintf("company=%s", company))
+	}
+	if agency != "" {
+		parts = append(parts, fmt.Sprintf("agency=%s", agency))
+	}
+	return strings.Join(parts, " | "), nil
+}
+
+// parseSpendQuery extracts company and agency from common spend prompts.
+func parseSpendQuery(prompt string) (company string, agency string) {
+	p := strings.TrimSpace(prompt)
+	if p == "" {
+		return
+	}
+	if m := spendAgencyRe.FindStringSubmatch(p); len(m) == 3 {
+		agency = normalizeEntity(m[1])
+		company = normalizeEntity(m[2])
+		return
+	}
+	if m := spendOnRe.FindStringSubmatch(p); len(m) >= 2 {
+		company = normalizeEntity(m[1])
+		if len(m) >= 3 {
+			agency = normalizeEntity(m[2])
+		}
+		return
+	}
+	if m := spendByAgencyRe.FindStringSubmatch(p); len(m) == 2 {
+		agency = normalizeEntity(m[1])
+		return
+	}
+	if m := spendAgencyOnlyRe.FindStringSubmatch(p); len(m) == 2 {
+		agency = normalizeEntity(m[1])
+	}
+	return
+}
+
+func normalizeEntity(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimSuffix(v, "?")
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	return strings.Title(strings.ToLower(v))
 }
 
 var spendOnRegex = regexp.MustCompile(`(?i)(?:how\s+much\s+was\s+)?(?:spent|spend|spending)\s+(?:on|with)\s+([^?.!\n]+)`) // covers common spend phrasing
-
-func maybePrefetchPrompt(prompt, sourceHint string, lookback int, useCache bool) {
-	keyword := extractPrefetchKeyword(prompt)
-	if keyword == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	go func() {
-		defer cancel()
-		prefetchCollectorData(ctx, keyword, sourceHint, lookback, useCache)
-	}()
-}
 
 func extractPrefetchKeyword(prompt string) string {
 	prompt = strings.TrimSpace(prompt)
@@ -176,18 +261,6 @@ func stripEdgeQuotes(s string) string {
 		}
 		return false
 	})
-}
-
-func prefetchCollectorData(ctx context.Context, keyword, sourceHint string, lookback int, useCache bool) {
-	search, ok := buildSearchRequest(ctx, keyword, sourceHint, lookback)
-	if !ok {
-		return
-	}
-	if useCache {
-		_, _ = runScrapeCached(ctx, search)
-	} else {
-		_, _ = runScrape(ctx, search)
-	}
 }
 
 func buildSearchRequest(ctx context.Context, keyword, sourceHint string, lookback int) (collector.SearchRequest, bool) {

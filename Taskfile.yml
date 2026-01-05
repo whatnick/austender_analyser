@@ -31,6 +31,11 @@ tasks:
     cmds:
       - bash ./hack/run-server.sh
 
+  stop:server:
+    desc: Stop the local API server (uses cached pid) and verify :8080 is free
+    cmds:
+      - bash ./hack/stop-server.sh
+
   run:frontend:
     desc: Open the minimal HTMX frontend
     cmds:
@@ -40,6 +45,11 @@ tasks:
     desc: Start server and open frontend
     cmds:
       - bash ./hack/run-local.sh
+
+  stop:local:
+    desc: Stop local dev processes (server) and verify :8080 is free
+    cmds:
+      - bash ./hack/stop-local.sh
 
   test:all:
     desc: Run tests across collector, server, and infra with merged coverage

@@ -121,3 +121,59 @@ func TestLLMHandler_AgentMode_ToolChain(t *testing.T) {
 		t.Fatalf("unexpected result: %s", resp.Result)
 	}
 }
+
+func TestLLMHandler_PrefetchSpend_RespectsSourceAndLookback(t *testing.T) {
+	// Ensure the prefetched context uses the request's source (e.g. vic)
+	// so the UI doesn't show Federal prefetch when a state is selected.
+	cacheDir := t.TempDir()
+	t.Setenv("AUSTENDER_CACHE_DIR", cacheDir)
+
+	oldNew := newLLMClient
+	newLLMClient = func(modelName, backendOverride string) (llms.Model, error) { return dummyLLM{}, nil }
+	defer func() { newLLMClient = oldNew }()
+
+	oldGen := generateFromPrompt
+	generateFromPrompt = func(ctx context.Context, client llms.Model, prompt string) (string, error) {
+		return `{"final":"ok"}`, nil
+	}
+	defer func() { generateFromPrompt = oldGen }()
+
+	oldSearch := runSearchWithCache
+	var gotReq collector.SearchRequest
+	runSearchWithCache = func(ctx context.Context, req collector.SearchRequest) (string, bool, error) {
+		gotReq = req
+		return "$123.00", true, nil
+	}
+	defer func() { runSearchWithCache = oldSearch }()
+
+	w := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]any{
+		"prompt":         "How much was spent on KPMG ?",
+		"agent":          true,
+		"source":         "vic",
+		"lookbackPeriod": 7,
+		"useCache":       true,
+	})
+	r := httptest.NewRequest(http.MethodPost, "/api/llm", bytes.NewReader(body))
+
+	llmHandler(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if gotReq.Source != "vic" {
+		t.Fatalf("expected prefetch source vic, got %q", gotReq.Source)
+	}
+	if gotReq.LookbackPeriod != 7 {
+		t.Fatalf("expected prefetch lookback 7, got %d", gotReq.LookbackPeriod)
+	}
+
+	var resp struct {
+		Context string `json:"context"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Context == "" {
+		t.Fatalf("expected prefetched context to be set")
+	}
+}

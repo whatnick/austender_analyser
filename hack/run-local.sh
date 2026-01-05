@@ -40,10 +40,7 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 
 if [[ ! -f "$PID_FILE" ]]; then
-	nohup "$SCRIPT_DIR/run-server.sh" >"$LOG_FILE" 2>&1 &
-	SERVER_PID=$!
-	echo "$SERVER_PID" >"$PID_FILE"
-	echo "[local] server started (pid=$SERVER_PID, log=$LOG_FILE)"
+	"$SCRIPT_DIR/run-server-bg.sh"
 fi
 
 # Give the server a moment to start
