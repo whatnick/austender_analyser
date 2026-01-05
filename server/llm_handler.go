@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -70,6 +71,8 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	maybePrefetchPrompt(req.Prompt, strings.TrimSpace(req.Source), lookback, useCache)
+
 	modelName, backendOverride, err := resolveModelName(strings.TrimSpace(req.Model))
 	if err != nil {
 		sendJSONError(w, err.Error(), http.StatusBadRequest)
@@ -113,13 +116,145 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		resp, err = generateFromPrompt(ctx, client, fullPrompt)
 		if err != nil {
-			sendJSONError(w, fmt.Sprintf("llm error: %v", err), http.StatusInternalServerError)
-			return
+			if fallback, ok := directAggregateResponse(basePrompt, strings.TrimSpace(req.Source), lookback, useCache); ok {
+				resp = fallback
+				err = nil
+			} else {
+				sendJSONError(w, fmt.Sprintf("llm error: %v", err), http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(LLMResponse{Result: resp})
+}
+
+var spendOnRegex = regexp.MustCompile(`(?i)(?:how\s+much\s+was\s+)?(?:spent|spend|spending)\s+(?:on|with)\s+([^?.!\n]+)`) // covers common spend phrasing
+
+func maybePrefetchPrompt(prompt, sourceHint string, lookback int, useCache bool) {
+	keyword := extractPrefetchKeyword(prompt)
+	if keyword == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	go func() {
+		defer cancel()
+		prefetchCollectorData(ctx, keyword, sourceHint, lookback, useCache)
+	}()
+}
+
+func extractPrefetchKeyword(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return ""
+	}
+	if matches := spendOnRegex.FindStringSubmatch(prompt); len(matches) == 2 {
+		candidate := strings.TrimSpace(matches[1])
+		candidate = strings.TrimSpace(stripEdgeQuotes(candidate))
+		candidate = strings.TrimSuffix(candidate, "?")
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			return candidate
+		}
+	}
+	// fallback: if prompt short, try entire prompt without punctuation
+	if len(prompt) <= 80 {
+		cleaned := strings.Trim(prompt, " ?!.\t\r\n")
+		if cleaned != "" {
+			return cleaned
+		}
+	}
+	return ""
+}
+
+func stripEdgeQuotes(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		switch r {
+		case '"', '\'', '`', '“', '”', '‘', '’':
+			return true
+		}
+		return false
+	})
+}
+
+func prefetchCollectorData(ctx context.Context, keyword, sourceHint string, lookback int, useCache bool) {
+	search, ok := buildSearchRequest(ctx, keyword, sourceHint, lookback)
+	if !ok {
+		return
+	}
+	if useCache {
+		_, _ = runScrapeCached(ctx, search)
+	} else {
+		_, _ = runScrape(ctx, search)
+	}
+}
+
+func buildSearchRequest(ctx context.Context, keyword, sourceHint string, lookback int) (collector.SearchRequest, bool) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return collector.SearchRequest{}, false
+	}
+	source := collector.CanonicalSourceID(strings.TrimSpace(sourceHint))
+	if source == "" {
+		source = collector.CanonicalSourceID(collector.DetectSourceFromText(keyword))
+	}
+	if lookback <= 0 {
+		lookback = 20
+	}
+	search := collector.SearchRequest{
+		Keyword:        keyword,
+		Source:         source,
+		LookbackPeriod: lookback,
+	}
+	opts := collector.EntityLookupOptions{Source: search.Source, Query: keyword, Limit: 1}
+	if res, err := collector.FindCompaniesFromCatalog(ctx, opts); err == nil && len(res.Candidates) > 0 {
+		top := res.Candidates[0]
+		company := strings.TrimSpace(top.Name)
+		if company == "" {
+			company = strings.TrimSpace(top.Key)
+		}
+		search.Company = company
+		if strings.TrimSpace(top.Source) != "" {
+			search.Source = collector.CanonicalSourceID(top.Source)
+		}
+	}
+	return search, true
+}
+
+func directAggregateResponse(prompt, sourceHint string, lookback int, useCache bool) (string, bool) {
+	keyword := extractPrefetchKeyword(prompt)
+	if keyword == "" {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	search, ok := buildSearchRequest(ctx, keyword, sourceHint, lookback)
+	if !ok {
+		return "", false
+	}
+	var (
+		total string
+		err   error
+	)
+	if useCache {
+		total, err = runScrapeCached(ctx, search)
+	} else {
+		total, err = runScrape(ctx, search)
+	}
+	if err != nil || strings.TrimSpace(total) == "" {
+		return "", false
+	}
+	target := keyword
+	if strings.TrimSpace(search.Company) != "" {
+		target = search.Company
+	}
+	scope := ""
+	if search.Source != "" {
+		scope = fmt.Sprintf(" (%s)", strings.ToUpper(search.Source))
+	}
+	result := fmt.Sprintf("Total spend on %s%s over the past %d years: %s", target, scope, search.LookbackPeriod, total)
+	return result, true
 }
 
 type LLMRequest struct {

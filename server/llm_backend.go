@@ -36,12 +36,31 @@ type LLMModelsResponse struct {
 	DefaultModel string         `json:"defaultModel,omitempty"`
 }
 
+var fetchOllamaModelsFunc = fetchOllamaModels
+
 func preferOpenAI() bool {
 	return strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != ""
 }
 
 func isOllamaConfigured() bool {
 	return strings.TrimSpace(os.Getenv("OLLAMA_HOST")) != ""
+}
+
+func defaultOpenAIModelName() string {
+	if envDefault := strings.TrimSpace(os.Getenv("OPENAI_DEFAULT_MODEL")); envDefault != "" {
+		return envDefault
+	}
+	return defaultOpenAIModel
+}
+
+func openAIModelInfo() []LLMModelInfo {
+	name := defaultOpenAIModelName()
+	return []LLMModelInfo{{
+		Name:     name,
+		Display:  name,
+		Provider: llmBackendOpenAI,
+		Default:  true,
+	}}
 }
 
 func currentLLMBackend() string {
@@ -87,6 +106,9 @@ func resolveModelName(requested string) (modelName string, backendOverride strin
 		}
 		models, err := getOllamaModels(context.Background())
 		if err != nil {
+			if preferOpenAI() {
+				return defaultOpenAIModelName(), llmBackendOpenAI, nil
+			}
 			return "", backendOverride, fmt.Errorf("failed to detect Ollama models: %w", err)
 		}
 		for _, m := range models {
@@ -94,24 +116,34 @@ func resolveModelName(requested string) (modelName string, backendOverride strin
 				return name, backendOverride, nil
 			}
 		}
+		if preferOpenAI() {
+			return defaultOpenAIModelName(), llmBackendOpenAI, nil
+		}
 		return "", backendOverride, fmt.Errorf("no Ollama models available; run `ollama list` to install one")
 	default:
-		if envDefault := strings.TrimSpace(os.Getenv("OPENAI_DEFAULT_MODEL")); envDefault != "" {
-			return envDefault, backendOverride, nil
-		}
-		return defaultOpenAIModel, backendOverride, nil
+		return defaultOpenAIModelName(), backendOverride, nil
 	}
 }
 
 func selectBackend(modelName, backendOverride string) string {
 	switch strings.ToLower(strings.TrimSpace(backendOverride)) {
 	case llmBackendOpenAI:
+		if preferOpenAI() {
+			return llmBackendOpenAI
+		}
+		if isOllamaConfigured() {
+			return llmBackendOllama
+		}
 		return llmBackendOpenAI
 	case llmBackendOllama:
 		if isOllamaConfigured() {
 			return llmBackendOllama
 		}
 		// Fall back to default if Ollama not available
+		if preferOpenAI() {
+			return llmBackendOpenAI
+		}
+		return llmBackendOpenAI
 	}
 
 	if preferOpenAI() {
@@ -128,6 +160,9 @@ func getAvailableLLMModels(ctx context.Context) ([]LLMModelInfo, error) {
 	case llmBackendOllama:
 		models, err := getOllamaModels(ctx)
 		if err != nil {
+			if preferOpenAI() {
+				return openAIModelInfo(), nil
+			}
 			return nil, err
 		}
 		defaultName := strings.TrimSpace(os.Getenv("OLLAMA_DEFAULT_MODEL"))
@@ -146,6 +181,9 @@ func getAvailableLLMModels(ctx context.Context) ([]LLMModelInfo, error) {
 			})
 		}
 		if len(infos) == 0 {
+			if preferOpenAI() {
+				return openAIModelInfo(), nil
+			}
 			return infos, nil
 		}
 		if defaultName == "" {
@@ -163,16 +201,7 @@ func getAvailableLLMModels(ctx context.Context) ([]LLMModelInfo, error) {
 		}
 		return infos, nil
 	default:
-		defaultName := strings.TrimSpace(os.Getenv("OPENAI_DEFAULT_MODEL"))
-		if defaultName == "" {
-			defaultName = defaultOpenAIModel
-		}
-		return []LLMModelInfo{{
-			Name:     defaultName,
-			Display:  defaultName,
-			Provider: llmBackendOpenAI,
-			Default:  true,
-		}}, nil
+		return openAIModelInfo(), nil
 	}
 }
 
@@ -186,18 +215,26 @@ func llmModelsHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	backend := currentLLMBackend()
 	models, err := getAvailableLLMModels(r.Context())
 	if err != nil {
-		sendJSONError(w, fmt.Sprintf("failed to list models: %v", err), http.StatusInternalServerError)
-		return
+		if preferOpenAI() {
+			backend = llmBackendOpenAI
+			models = openAIModelInfo()
+		} else {
+			sendJSONError(w, fmt.Sprintf("failed to list models: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
-	backend := currentLLMBackend()
 	defaultModel := ""
 	for _, m := range models {
 		if m.Default {
 			defaultModel = m.Name
 			break
 		}
+	}
+	if defaultModel == "" && len(models) > 0 {
+		defaultModel = models[0].Name
 	}
 	resp := LLMModelsResponse{Backend: backend, Models: models, DefaultModel: defaultModel}
 	if backend == llmBackendOllama {
@@ -268,7 +305,7 @@ func getOllamaModels(ctx context.Context) ([]ollamaModel, error) {
 	}
 	ollamaModelCache.mu.Unlock()
 
-	models, err := fetchOllamaModels(ctx, host)
+	models, err := fetchOllamaModelsFunc(ctx, host)
 	ttl := 30 * time.Second
 	if err != nil {
 		ttl = 10 * time.Second

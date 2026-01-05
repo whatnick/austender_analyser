@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -132,5 +133,61 @@ func TestSelectBackendPrefersOpenAI(t *testing.T) {
 	backend = selectBackend("", llmBackendOllama)
 	if backend != llmBackendOllama {
 		t.Fatalf("expected override to force ollama, got %s", backend)
+	}
+}
+
+func TestSelectBackendFallsBackToOllamaWhenOpenAIKeyMissing(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+	backend := selectBackend("", llmBackendOpenAI)
+	if backend != llmBackendOllama {
+		t.Fatalf("expected fallback to ollama, got %s", backend)
+	}
+
+	backend = selectBackend("", "")
+	if backend != llmBackendOllama {
+		t.Fatalf("expected default fallback to ollama, got %s", backend)
+	}
+}
+
+func TestLLMModelsHandlerFallbackToOpenAI(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	t.Setenv("OPENAI_DEFAULT_MODEL", "gpt-fallback")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+	resetOllamaModelCache()
+
+	oldFetch := fetchOllamaModelsFunc
+	fetchOllamaModelsFunc = func(ctx context.Context, rawHost string) ([]ollamaModel, error) {
+		return nil, fmt.Errorf("offline")
+	}
+	defer func() {
+		fetchOllamaModelsFunc = oldFetch
+		resetOllamaModelCache()
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/llm/models", nil)
+	w := httptest.NewRecorder()
+	llmModelsHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp LLMModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Backend != llmBackendOpenAI {
+		t.Fatalf("expected backend %s, got %s", llmBackendOpenAI, resp.Backend)
+	}
+	if resp.Endpoint != "" {
+		t.Fatalf("expected empty endpoint, got %q", resp.Endpoint)
+	}
+	if resp.DefaultModel != "gpt-fallback" {
+		t.Fatalf("expected default model gpt-fallback, got %s", resp.DefaultModel)
+	}
+	if len(resp.Models) != 1 || resp.Models[0].Provider != llmBackendOpenAI {
+		t.Fatalf("expected single openai model, got %+v", resp.Models)
 	}
 }

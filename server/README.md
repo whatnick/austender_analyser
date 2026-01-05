@@ -16,17 +16,11 @@ All routes honour CORS preflight (`OPTIONS`). `/api/scrape` and `/api/llm` sit b
 - `task server:build` cross-compiles `dist/main.zip` for deployment.
 
 ## Key Environment Variables
-- `OPENAI_API_KEY` – enables OpenAI backend (preferred when set).
-- `OLLAMA_HOST` – enables Ollama backend and model picker; set alongside optional `OLLAMA_DEFAULT_MODEL` and `OLLAMA_SYSTEM_PROMPT`.
-- `AUSTENDER_CACHE_DIR`, `AUSTENDER_CACHE_TZ` – passed to collector helpers and same-day cache utilities.
-- `AUSTENDER_MCP_CONFIG` – default MCP config JSON injected into `/api/llm` requests when present.
-
-## Testing
-- Run module tests with coverage: `task server:test`
+- If `OPENAI_API_KEY` is present the server prefers OpenAI regardless of `OLLAMA_HOST`, and automatically falls back to OpenAI listings when the Ollama host is unreachable. Set `OLLAMA_HOST` (plus `OLLAMA_DEFAULT_MODEL` if desired) to surface local models when OpenAI is unavailable. Prefix a requested model with `ollama:` or `openai:` to force a specific backend per-request.
 - Repo-wide coverage (collector + server + infra): `task test:all`
 
 ## Implementation Notes
 - `api.go` owns HTTP routing, daily in-memory cache, and request validation shared by local and Lambda modes.
-- `llm_handler.go` selects backend (`openai` vs `ollama`), executes the tool-using agent loop, and gracefully falls back to vanilla completion.
+- `llm_handler.go` selects backend (`openai` vs `ollama`), warms caches ahead of agent runs, and falls back to either vanilla completion or a direct collector aggregation when models time out.
 - `mcp_server.go` stays aligned with collector helpers; update both when request/response structs evolve.
 - Lambda builds use `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`; deploy via `task server:fastdeploy` once the SSM parameter `austender` points to the target function name.

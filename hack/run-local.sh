@@ -9,6 +9,26 @@ PID_FILE="$PID_DIR/austender_server.pid"
 LOG_FILE="$PID_DIR/austender_server.log"
 mkdir -p "$PID_DIR"
 
+# Prefer OpenAI locally when credentials are available. Attempt a simple env file lookup
+# for convenience so users can drop their key in ~/.config/austender/openai.key or
+# ~/.config/austender/openai.env (export format) instead of exporting it manually.
+if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+	OPENAI_KEY_FILE="${AUSTENDER_OPENAI_KEY_FILE:-$HOME/.config/austender/openai.key}"
+	OPENAI_ENV_FILE="${AUSTENDER_OPENAI_ENV_FILE:-$HOME/.config/austender/openai.env}"
+	if [[ -f "$OPENAI_ENV_FILE" ]]; then
+		source "$OPENAI_ENV_FILE"
+		if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+			echo "[local] loaded OPENAI_API_KEY from $OPENAI_ENV_FILE"
+		fi
+	elif [[ -f "$OPENAI_KEY_FILE" ]]; then
+		OPENAI_API_KEY="$(<"$OPENAI_KEY_FILE")"
+		export OPENAI_API_KEY
+		if [[ -n "$OPENAI_API_KEY" ]]; then
+			echo "[local] loaded OPENAI_API_KEY from $OPENAI_KEY_FILE"
+		fi
+	fi
+fi
+
 # Start server in background (or reuse an existing one) so Task doesn't block.
 if [[ -f "$PID_FILE" ]]; then
 	OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
