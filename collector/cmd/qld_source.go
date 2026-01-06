@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,8 +35,9 @@ const qldDefaultSearchURL = "https://www.data.qld.gov.au/dataset/?q=contract+dis
 const qldUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 var (
-	errQldNoResults = errors.New("qld scrape returned no resources")
-	reQldDataURL    = regexp.MustCompile(`(?i)\.(csv|xlsx|xls)(?:\?|$)`) // used on hrefs
+	errQldNoResults              = errors.New("qld scrape returned no resources")
+	errQldMissingRequiredColumns = errors.New("qld missing required columns")
+	reQldDataURL                 = regexp.MustCompile(`(?i)\.(csv|xlsx|xls)(?:\?|$)`) // used on hrefs
 )
 
 type qldSource struct {
@@ -470,6 +472,7 @@ func qldDownloadAndParse(ctx context.Context, jobs []qldDownloadJob, needed map[
 				}
 				body, err := qldDownload(ctx, client, job.downloadURL)
 				if err != nil {
+					err = fmt.Errorf("qld download %s: %w", job.downloadURL, err)
 					select {
 					case errCh <- err:
 					default:
@@ -480,6 +483,11 @@ func qldDownloadAndParse(ctx context.Context, jobs []qldDownloadJob, needed map[
 
 				summaries, err := qldParseTabular(job, body, needed)
 				if err != nil {
+					if errors.Is(err, errQldMissingRequiredColumns) {
+						// Skip non-data/template sheets while continuing the scrape.
+						continue
+					}
+					err = fmt.Errorf("qld parse %s (%s): %w", job.downloadURL, job.format, err)
 					select {
 					case errCh <- err:
 					default:
@@ -621,7 +629,7 @@ func qldParseCSV(job qldDownloadJob, body []byte, needed map[string]dateWindow) 
 		for i := 0; i < len(scanned) && i < 3; i++ {
 			samples = append(samples, strings.Join(scanned[i], " | "))
 		}
-		return nil, fmt.Errorf("qld csv missing required columns (award date/value); delimiter=%q; first rows: %s", string(comma), strings.Join(samples, " || "))
+		return nil, fmt.Errorf("%w: qld csv missing required columns (award date/value); delimiter=%q; first rows: %s", errQldMissingRequiredColumns, string(comma), strings.Join(samples, " || "))
 	}
 
 	col := qldHeaderIndex(headers)
@@ -687,8 +695,9 @@ func qldParseXLSX(job qldDownloadJob, body []byte, needed map[string]dateWindow)
 		return nil, errors.New("qld xlsx has no sheets")
 	}
 
-	// Search across all sheets; many QLD reports use a cover/preamble sheet first.
-	const maxHeaderScan = 250
+	// Search across all sheets; many QLD reports use a cover/preamble section first.
+	// Bound the scan so we don't walk huge sheets indefinitely.
+	const maxHeaderScan = 2000
 	for _, sheet := range sheets {
 		rows, err := f.GetRows(sheet)
 		if err != nil {
@@ -751,9 +760,9 @@ func qldParseXLSX(job qldDownloadJob, body []byte, needed map[string]dateWindow)
 		break
 	}
 	if sampleSheet == "" {
-		return nil, fmt.Errorf("qld xlsx missing required columns (award date/value); no non-empty sheets")
+		return nil, fmt.Errorf("%w: qld xlsx missing required columns (award date/value); no non-empty sheets", errQldMissingRequiredColumns)
 	}
-	return nil, fmt.Errorf("qld xlsx missing required columns (award date/value); sheets=%s; sample sheet=%q first rows: %s", strings.Join(sheets, ", "), sampleSheet, strings.Join(sampleRows, " || "))
+	return nil, fmt.Errorf("%w: qld xlsx missing required columns (award date/value); sheets=%s; sample sheet=%q first rows: %s", errQldMissingRequiredColumns, strings.Join(sheets, ", "), sampleSheet, strings.Join(sampleRows, " || "))
 }
 
 func qldParseXLS(job qldDownloadJob, body []byte, needed map[string]dateWindow) ([]MatchSummary, error) {
@@ -789,7 +798,7 @@ func qldParseXLS(job qldDownloadJob, body []byte, needed map[string]dateWindow) 
 	}
 	col := qldHeaderIndex(headers)
 	if col.awardDate < 0 || col.value < 0 {
-		return nil, fmt.Errorf("qld xls missing required columns (award date/value)")
+		return nil, fmt.Errorf("%w: qld xls missing required columns (award date/value)", errQldMissingRequiredColumns)
 	}
 
 	var out []MatchSummary
@@ -861,10 +870,43 @@ func qldHeaderIndex(headers []string) qldColumnIndex {
 	}
 
 	idx.agency = find("agency", "agency name", "department", "agency/entity", "entity")
-	idx.supplier = find("supplier name", "supplier", "vendor", "contractor")
-	idx.awardDate = find("award contract date", "award date", "contract date", "date awarded", "awarded date")
-	idx.value = find("contract value", "value", "total contract value", "contract amount", "amount")
+	idx.supplier = find("supplier name", "supplier", "vendor", "contractor", "contract party")
+	idx.awardDate = find(
+		"award contract date",
+		"award date",
+		"contract date",
+		"date awarded",
+		"awarded date",
+		"start date",
+		"commencement date",
+		"effective date",
+	)
+	idx.value = find(
+		"contract value",
+		"total contract value",
+		"contract amount",
+		"amount",
+		"revised value",
+		"revised value (inc)",
+		"revised value (inc)",
+		"revised value inc",
+		"revised value (incl)",
+		"revised value (incl)",
+		"value (inc)",
+		"value (incl)",
+		"value inc",
+		"value incl",
+	)
 	idx.reference = find("contract reference number", "contract number", "reference", "contract reference")
+	if idx.reference < 0 {
+		// Some QLD report-style XLSX files use a bare "Contract" header for the reference.
+		for i, h := range norm {
+			if h == "contract" {
+				idx.reference = i
+				break
+			}
+		}
+	}
 	idx.title = find("contract description", "description", "title", "purpose")
 	return idx
 }
@@ -924,6 +966,17 @@ func parseQldDate(raw string) time.Time {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return time.Time{}
+	}
+
+	// Some XLSX files use Excel serial dates (days since 1899-12-30).
+	// Example: 44942 => 2023-01-16
+	if serial, err := strconv.ParseFloat(raw, 64); err == nil {
+		// Guard rails to avoid accidentally treating values/IDs as dates.
+		if serial >= 20000 && serial <= 80000 {
+			base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+			days := time.Duration(serial*24) * time.Hour
+			return base.Add(days).UTC()
+		}
 	}
 	// Some sheets include timestamps; trim common suffixes.
 	raw = strings.TrimSpace(strings.TrimSuffix(raw, "00:00:00"))

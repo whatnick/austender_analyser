@@ -106,3 +106,17 @@ func TestQldParseCSV_MapsFieldsAndFiltersByWindow(t *testing.T) {
 	require.Equal(t, time.Date(2024, 7, 10, 0, 0, 0, 0, time.UTC), got.ReleaseDate)
 	require.Equal(t, "1234.56", got.Amount.StringFixed(2))
 }
+
+func TestQldHeaderIndex_ReportStyleXlsxHeaders(t *testing.T) {
+	// Matches the header row used by at least one real QLD report-style XLSX.
+	headers := []string{"LIST", "Contract", "Description", "Contract Party", "ABN", "Contract Type", "Revised Value (inc)", "Start Date", "End Date"}
+	idx := qldHeaderIndex(headers)
+	require.GreaterOrEqual(t, idx.awardDate, 0)
+	require.GreaterOrEqual(t, idx.value, 0)
+	require.GreaterOrEqual(t, idx.supplier, 0)
+}
+
+func TestParseQldDate_ExcelSerial(t *testing.T) {
+	got := parseQldDate("44942")
+	require.Equal(t, time.Date(2023, 1, 16, 0, 0, 0, 0, time.UTC), got)
+}
