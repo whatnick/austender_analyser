@@ -3,16 +3,17 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,41 +22,339 @@ import (
 	"time"
 
 	"github.com/extrame/xls"
-	"github.com/gocolly/colly/v2"
 	"github.com/shopspring/decimal"
 	"github.com/xuri/excelize/v2"
 )
 
 const qldSourceID = "qld"
 
-const qldDefaultBaseURL = "https://www.data.qld.gov.au"
-const qldDefaultSearchURL = "https://www.data.qld.gov.au/dataset/?q=contract+disclosure&page=1"
+const qldCKANBaseURL = "https://www.data.qld.gov.au"
+const qldCKANSearchQuery = "contract+disclosure"
 
-// Chrome-like UA to reduce blocks.
+// qldUserAgent for API requests.
 const qldUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 var (
-	errQldNoResults              = errors.New("qld scrape returned no resources")
+	errQldNoResults              = errors.New("qld ckan returned no resources")
 	errQldMissingRequiredColumns = errors.New("qld missing required columns")
-	reQldDataURL                 = regexp.MustCompile(`(?i)\.(csv|xlsx|xls)(?:\?|$)`) // used on hrefs
 )
 
+// --- CKAN API types ---
+
+// CKANResponse wraps the standard CKAN Action API response envelope.
+type CKANResponse[T any] struct {
+	Success bool `json:"success"`
+	Result  T    `json:"result"`
+	Error   *struct {
+		Message string `json:"message"`
+		Type    string `json:"__type"`
+	} `json:"error,omitempty"`
+}
+
+// CKANPackageSearchResult is the result payload for package_search.
+type CKANPackageSearchResult struct {
+	Count   int           `json:"count"`
+	Results []CKANPackage `json:"results"`
+}
+
+// CKANPackage represents a dataset in CKAN.
+type CKANPackage struct {
+	ID               string         `json:"id"`
+	Name             string         `json:"name"`
+	Title            string         `json:"title"`
+	Organization     *CKANOrg       `json:"organization,omitempty"`
+	MetadataModified string         `json:"metadata_modified"`
+	Resources        []CKANResource `json:"resources"`
+}
+
+// CKANOrg is the organization owning a dataset.
+type CKANOrg struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Title string `json:"title"`
+}
+
+// CKANResource is an individual file/link within a dataset.
+type CKANResource struct {
+	ID           string `json:"id"`
+	PackageID    string `json:"package_id"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	Format       string `json:"format"`
+	LastModified string `json:"last_modified"`
+	Created      string `json:"created"`
+	Size         any    `json:"size,omitempty"` // Can be int or string in CKAN API
+}
+
+// CKANClient wraps HTTP calls to a CKAN Action API endpoint.
+type CKANClient struct {
+	baseURL    string
+	httpClient *http.Client
+	token      string // optional; from QLD_ODATA_TOKEN
+}
+
+// NewCKANClient creates a client for the given CKAN instance.
+func NewCKANClient(baseURL, token string) *CKANClient {
+	return &CKANClient{
+		baseURL: strings.TrimSuffix(baseURL, "/"),
+		httpClient: &http.Client{
+			Timeout: 60 * time.Second,
+		},
+		token: token,
+	}
+}
+
+// PackageSearch calls package_search with the given query and pagination.
+func (c *CKANClient) PackageSearch(ctx context.Context, query string, rows, start int) (*CKANPackageSearchResult, error) {
+	endpoint := fmt.Sprintf("%s/api/3/action/package_search?q=%s&rows=%d&start=%d", c.baseURL, url.QueryEscape(query), rows, start)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", qldUserAgent)
+	req.Header.Set("Accept", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ckan package_search: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var ckanResp CKANResponse[CKANPackageSearchResult]
+	if err := json.NewDecoder(resp.Body).Decode(&ckanResp); err != nil {
+		return nil, fmt.Errorf("ckan package_search decode: %w", err)
+	}
+	if !ckanResp.Success {
+		errMsg := "unknown error"
+		if ckanResp.Error != nil {
+			errMsg = ckanResp.Error.Message
+		}
+		return nil, fmt.Errorf("ckan package_search failed: %s", errMsg)
+	}
+	return &ckanResp.Result, nil
+}
+
 type qldSource struct {
-	baseURL   string
-	searchURL string
+	baseURL    string
+	ckanClient *CKANClient
 }
 
 func newQldSource() Source {
-	return qldSource{baseURL: qldDefaultBaseURL, searchURL: qldDefaultSearchURL}
+	token := os.Getenv("QLD_ODATA_TOKEN")
+	return qldSource{
+		baseURL:    qldCKANBaseURL,
+		ckanClient: NewCKANClient(qldCKANBaseURL, token),
+	}
 }
 
-func newQldSourceForTests(baseURL, searchURL string) Source {
-	return qldSource{baseURL: baseURL, searchURL: searchURL}
+func newQldSourceForTests(baseURL, _ string) Source {
+	return qldSource{
+		baseURL:    baseURL,
+		ckanClient: NewCKANClient(baseURL, ""),
+	}
 }
 
 func (q qldSource) ID() string { return qldSourceID }
 
-// QLD scraping depends on live data.qld.gov.au pages.
+// qldDownloadJob describes a downloadable resource from CKAN.
+type qldDownloadJob struct {
+	resourceID    string
+	downloadURL   string
+	format        string
+	datasetTitle  string
+	resourceTitle string
+	lastModified  time.Time
+	organization  string
+}
+
+// qldDiscoverResourcesViaCKAN uses the CKAN Action API to find contract disclosure resources.
+func qldDiscoverResourcesViaCKAN(ctx context.Context, client *CKANClient) ([]qldDownloadJob, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	const pageSize = 100
+	var allJobs []qldDownloadJob
+	seen := make(map[string]struct{})
+	start := 0
+
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		result, err := client.PackageSearch(ctx, qldCKANSearchQuery, pageSize, start)
+		if err != nil {
+			return nil, fmt.Errorf("ckan discovery: %w", err)
+		}
+
+		for _, pkg := range result.Results {
+			org := ""
+			if pkg.Organization != nil {
+				org = pkg.Organization.Title
+			}
+
+			for _, res := range pkg.Resources {
+				// Filter by format - only CSV, XLSX, XLS.
+				format := strings.ToLower(strings.TrimSpace(res.Format))
+				if format != "csv" && format != "xlsx" && format != "xls" {
+					continue
+				}
+
+				// Validate URL - skip malformed/relative URLs.
+				resURL := strings.TrimSpace(res.URL)
+				if resURL == "" {
+					continue
+				}
+				parsedURL, err := url.Parse(resURL)
+				if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+					// Skip invalid or relative URLs.
+					continue
+				}
+				if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+					continue
+				}
+				// Skip URLs where "host" looks like a filename (contains . but no domain structure).
+				if !strings.Contains(parsedURL.Host, ".") || strings.HasSuffix(strings.ToLower(parsedURL.Host), ".xlsx") ||
+					strings.HasSuffix(strings.ToLower(parsedURL.Host), ".xls") ||
+					strings.HasSuffix(strings.ToLower(parsedURL.Host), ".csv") {
+					continue
+				}
+
+				if _, ok := seen[res.ID]; ok {
+					continue
+				}
+				seen[res.ID] = struct{}{}
+
+				lastMod := parseQldCKANTime(res.LastModified)
+				if lastMod.IsZero() {
+					lastMod = parseQldCKANTime(res.Created)
+				}
+
+				allJobs = append(allJobs, qldDownloadJob{
+					resourceID:    res.ID,
+					downloadURL:   resURL,
+					format:        format,
+					datasetTitle:  pkg.Title,
+					resourceTitle: res.Name,
+					lastModified:  lastMod,
+					organization:  org,
+				})
+			}
+		}
+
+		start += len(result.Results)
+		if start >= result.Count || len(result.Results) == 0 {
+			break
+		}
+	}
+
+	// Sort for deterministic ordering.
+	sort.Slice(allJobs, func(i, j int) bool {
+		return allJobs[i].downloadURL < allJobs[j].downloadURL
+	})
+
+	return allJobs, nil
+}
+
+// parseQldCKANTime parses CKAN timestamp formats.
+func parseQldCKANTime(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05.999999",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+// qldCacheDir returns the directory for caching QLD downloaded files.
+func qldCacheDir() string {
+	return filepath.Join(defaultCacheDir(), "qld_ckan")
+}
+
+// qldCachedFilePath returns the cache path for a resource.
+func qldCachedFilePath(resourceID, format string) string {
+	return filepath.Join(qldCacheDir(), fmt.Sprintf("%s.%s", resourceID, format))
+}
+
+// qldCacheMetaPath returns the metadata cache path.
+func qldCacheMetaPath(resourceID string) string {
+	return filepath.Join(qldCacheDir(), fmt.Sprintf("%s.meta.json", resourceID))
+}
+
+// qldCacheMeta stores metadata about a cached file.
+type qldCacheMeta struct {
+	ResourceID   string    `json:"resource_id"`
+	URL          string    `json:"url"`
+	Format       string    `json:"format"`
+	LastModified time.Time `json:"last_modified"`
+	CachedAt     time.Time `json:"cached_at"`
+	ETag         string    `json:"etag,omitempty"`
+	ContentHash  string    `json:"content_hash"`
+}
+
+// qldLoadCacheMeta loads metadata for a cached resource.
+func qldLoadCacheMeta(resourceID string) (*qldCacheMeta, error) {
+	data, err := os.ReadFile(qldCacheMetaPath(resourceID))
+	if err != nil {
+		return nil, err
+	}
+	var meta qldCacheMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+// qldSaveCacheMeta saves metadata for a cached resource.
+func qldSaveCacheMeta(meta *qldCacheMeta) error {
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(qldCacheMetaPath(meta.ResourceID), data, 0o644)
+}
+
+// qldIsCacheValid checks if a cached file is still valid.
+func qldIsCacheValid(job qldDownloadJob) bool {
+	meta, err := qldLoadCacheMeta(job.resourceID)
+	if err != nil {
+		return false
+	}
+
+	// Check if the file exists.
+	cachedPath := qldCachedFilePath(job.resourceID, job.format)
+	if _, err := os.Stat(cachedPath); os.IsNotExist(err) {
+		return false
+	}
+
+	// If CKAN reports a newer last_modified, cache is stale.
+	if !job.lastModified.IsZero() && meta.LastModified.Before(job.lastModified) {
+		return false
+	}
+
+	return true
+}
+
+// QLD source uses CKAN API for discovery.
 //
 //go:nocover
 func (q qldSource) Run(ctx context.Context, req SearchRequest) (string, error) {
@@ -85,7 +384,8 @@ func (q qldSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		return formatMoneyDecimal(decimal.Zero), nil
 	}
 
-	jobs, err := qldDiscoverDownloadJobs(ctx, q.baseURL, q.searchURL)
+	// Discover resources via CKAN API.
+	jobs, err := qldDiscoverResourcesViaCKAN(ctx, q.ckanClient)
 	if err != nil {
 		return "", err
 	}
@@ -93,7 +393,8 @@ func (q qldSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		return "", errQldNoResults
 	}
 
-	buckets, err := qldDownloadAndParse(ctx, jobs, needed)
+	// Download and parse resources with caching.
+	buckets, err := qldDownloadAndParseCached(ctx, jobs, needed, req)
 	if err != nil {
 		return "", err
 	}
@@ -158,7 +459,9 @@ func (q qldSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 					continue
 				}
 				cbMu.Lock()
-				if req.OnMatch != nil {
+				// When verbose output is enabled, QLD streams matches during tabular parsing.
+				// Avoid double-calling OnMatch here.
+				if req.OnMatch != nil && !req.Verbose {
 					req.OnMatch(summary)
 				}
 				cbMu.Unlock()
@@ -177,264 +480,19 @@ func (q qldSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	return formatMoneyDecimal(total), nil
 }
 
-type qldDownloadJob struct {
-	resourcePageURL string
-	downloadURL     string
-	format          string
-	datasetTitle    string
-	resourceTitle   string
-}
-
-func qldDiscoverDownloadJobs(ctx context.Context, baseURL string, searchURL string) ([]qldDownloadJob, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if baseURL == "" {
-		baseURL = qldDefaultBaseURL
-	}
-	if searchURL == "" {
-		searchURL = qldDefaultSearchURL
-	}
-
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, err
-	}
-	allowedDomain := base.Hostname()
-
-	timeout := resolveTimeout()
-
-	// Crawl search result pages to find dataset URLs.
-	searchCollector := colly.NewCollector(
-		colly.AllowedDomains(allowedDomain),
-		colly.AllowURLRevisit(),
-		colly.UserAgent(qldUserAgent),
-		colly.Async(true),
-	)
-	searchCollector.WithTransport(&http.Transport{Proxy: http.ProxyFromEnvironment})
-	searchCollector.SetRequestTimeout(timeout)
-
-	parallelism := minInt(resolveMaxConcurrency(), 2)
-	delay := 2 * time.Second
-	randomDelay := 1500 * time.Millisecond
-	// Keep tests (httptest/localhost) fast and deterministic.
-	if allowedDomain != "data.qld.gov.au" && allowedDomain != "www.data.qld.gov.au" {
-		parallelism = minInt(resolveMaxConcurrency(), 8)
-		delay = 0
-		randomDelay = 0
-	}
-	_ = searchCollector.Limit(&colly.LimitRule{
-		DomainGlob:  "*",
-		Parallelism: parallelism,
-		Delay:       delay,
-		RandomDelay: randomDelay,
-	})
-
-	datasetCollector := searchCollector.Clone()
-	resourceCollector := searchCollector.Clone()
-
-	datasetURLs := make(map[string]struct{})
-	resourcePageURLs := make(map[string]qldDownloadJob)
-	jobsByDownload := make(map[string]qldDownloadJob)
-
-	var mu sync.Mutex
-	var scrapeErr error
-
-	searchCollector.OnRequest(func(r *colly.Request) {
-		if ctx.Err() != nil {
-			r.Abort()
-			return
-		}
-		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-		r.Headers.Set("Accept-Language", "en")
-		r.Headers.Set("Upgrade-Insecure-Requests", "1")
-	})
-	searchCollector.OnError(func(_ *colly.Response, err error) {
-		mu.Lock()
-		if scrapeErr == nil {
-			scrapeErr = err
-		}
-		mu.Unlock()
-	})
-
-	// CKAN theme usually uses h3.dataset-heading a; we also accept any /dataset/<slug> links.
-	searchCollector.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		if ctx.Err() != nil {
-			return
-		}
-		href := strings.TrimSpace(e.Attr("href"))
-		if href == "" {
-			return
-		}
-		abs := e.Request.AbsoluteURL(href)
-		u, err := url.Parse(abs)
-		if err != nil {
-			return
-		}
-
-		// Follow pagination: keep it scoped to /dataset/ with the same search query.
-		if u.Path == "/dataset/" {
-			q := u.Query().Get("q")
-			page := u.Query().Get("page")
-			if page == "" {
-				return
-			}
-			// Only follow the contract disclosure search.
-			if strings.Contains(strings.ToLower(q), "contract") {
-				mu.Lock()
-				if _, ok := datasetURLs[abs]; !ok {
-					datasetURLs[abs] = struct{}{}
-					_ = searchCollector.Visit(abs)
-				}
-				mu.Unlock()
-			}
-			return
-		}
-
-		// Follow pagination: keep it scoped to /dataset/ with the same search query.
-		if strings.HasPrefix(u.Path, "/dataset/") {
-			// Avoid resource pages here.
-			if strings.Contains(u.Path, "/resource/") {
-				return
-			}
-			mu.Lock()
-			if _, ok := datasetURLs[abs]; !ok {
-				datasetURLs[abs] = struct{}{}
-				_ = datasetCollector.Visit(abs)
-			}
-			mu.Unlock()
-			return
-		}
-	})
-
-	datasetCollector.OnError(func(_ *colly.Response, err error) {
-		mu.Lock()
-		if scrapeErr == nil {
-			scrapeErr = err
-		}
-		mu.Unlock()
-	})
-
-	datasetCollector.OnHTML("title", func(e *colly.HTMLElement) {
-		// track dataset title via request context if needed
-		_ = e
-	})
-
-	// Resource links on dataset pages.
-	datasetCollector.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		if ctx.Err() != nil {
-			return
-		}
-		href := strings.TrimSpace(e.Attr("href"))
-		if href == "" {
-			return
-		}
-		abs := e.Request.AbsoluteURL(href)
-		u, err := url.Parse(abs)
-		if err != nil {
-			return
-		}
-		if !strings.Contains(u.Path, "/resource/") {
-			return
-		}
-		if !strings.HasPrefix(u.Path, "/dataset/") {
-			return
-		}
-
-		mu.Lock()
-		if _, ok := resourcePageURLs[abs]; ok {
-			mu.Unlock()
-			return
-		}
-		resourcePageURLs[abs] = qldDownloadJob{resourcePageURL: abs}
-		mu.Unlock()
-		_ = resourceCollector.Visit(abs)
-	})
-
-	resourceCollector.OnError(func(_ *colly.Response, err error) {
-		mu.Lock()
-		if scrapeErr == nil {
-			scrapeErr = err
-		}
-		mu.Unlock()
-	})
-
-	resourceCollector.OnHTML("h1", func(e *colly.HTMLElement) {
-		// best-effort resource title
-		mu.Lock()
-		job := resourcePageURLs[e.Request.URL.String()]
-		if job.resourceTitle == "" {
-			job.resourceTitle = strings.TrimSpace(e.Text)
-			resourcePageURLs[e.Request.URL.String()] = job
-		}
-		mu.Unlock()
-	})
-
-	resourceCollector.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		if ctx.Err() != nil {
-			return
-		}
-		href := strings.TrimSpace(e.Attr("href"))
-		if href == "" {
-			return
-		}
-		if !strings.Contains(href, "/download/") {
-			return
-		}
-		if !reQldDataURL.MatchString(href) {
-			return
-		}
-		dl := e.Request.AbsoluteURL(href)
-		ext := qldFileExt(dl)
-		if ext == "" {
-			return
-		}
-
-		mu.Lock()
-		job := resourcePageURLs[e.Request.URL.String()]
-		job.downloadURL = dl
-		job.format = ext
-		resourcePageURLs[e.Request.URL.String()] = job
-		// de-dupe by download URL
-		if _, ok := jobsByDownload[dl]; !ok {
-			jobsByDownload[dl] = job
-		}
-		mu.Unlock()
-	})
-
-	if err := searchCollector.Visit(searchURL); err != nil {
-		return nil, err
-	}
-	searchCollector.Wait()
-	datasetCollector.Wait()
-	resourceCollector.Wait()
-
-	mu.Lock()
-	err = scrapeErr
-	mu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-
-	var jobs []qldDownloadJob
-	for _, job := range jobsByDownload {
-		if job.downloadURL == "" {
-			continue
-		}
-		jobs = append(jobs, job)
-	}
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].downloadURL < jobs[j].downloadURL
-	})
-	return jobs, nil
-}
-
-func qldDownloadAndParse(ctx context.Context, jobs []qldDownloadJob, needed map[string]dateWindow) (map[string][]MatchSummary, error) {
+// qldDownloadAndParseCached downloads and parses resources with file caching.
+func qldDownloadAndParseCached(ctx context.Context, jobs []qldDownloadJob, needed map[string]dateWindow, req SearchRequest) (map[string][]MatchSummary, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if len(jobs) == 0 {
 		return map[string][]MatchSummary{}, nil
+	}
+
+	// Ensure cache directory exists.
+	cacheDir := qldCacheDir()
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create qld cache dir: %w", err)
 	}
 
 	maxWorkers := resolveMaxConcurrency()
@@ -444,18 +502,19 @@ func qldDownloadAndParse(ctx context.Context, jobs []qldDownloadJob, needed map[
 	if maxWorkers > len(jobs) {
 		maxWorkers = len(jobs)
 	}
-	// Be conservative; QLD portal has crawl delay and resources can be large.
-	if maxWorkers > 3 {
-		maxWorkers = 3
+	// Be conservative; QLD portal resources can be large.
+	if maxWorkers > 5 {
+		maxWorkers = 5
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 60 * time.Second}
 	jobsCh := make(chan qldDownloadJob)
 	var wg sync.WaitGroup
 
 	buckets := make(map[string][]MatchSummary)
 	seen := make(map[string]struct{})
 	var mu sync.Mutex
+	var cbMu sync.Mutex
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -470,34 +529,32 @@ func qldDownloadAndParse(ctx context.Context, jobs []qldDownloadJob, needed map[
 				if ctx.Err() != nil {
 					return
 				}
-				body, err := qldDownload(ctx, client, job.downloadURL)
+
+				body, err := qldDownloadCached(ctx, client, job)
 				if err != nil {
-					err = fmt.Errorf("qld download %s: %w", job.downloadURL, err)
-					select {
-					case errCh <- err:
-					default:
-					}
-					cancel()
-					return
+					// Log download errors but continue - some URLs may be stale.
+					fmt.Fprintf(os.Stderr, "qld download warning: %s: %v\n", job.downloadURL, err)
+					continue
 				}
 
 				summaries, err := qldParseTabular(job, body, needed)
 				if err != nil {
 					if errors.Is(err, errQldMissingRequiredColumns) {
-						// Skip non-data/template sheets while continuing the scrape.
+						// Skip non-data/template sheets while continuing.
 						continue
 					}
-					err = fmt.Errorf("qld parse %s (%s): %w", job.downloadURL, job.format, err)
-					select {
-					case errCh <- err:
-					default:
-					}
-					cancel()
-					return
+					// Log parse errors but continue - some files may be corrupt or wrong format.
+					fmt.Fprintf(os.Stderr, "qld parse warning: %s (%s): %v\n", job.downloadURL, job.format, err)
+					continue
 				}
 
+				var toStream []MatchSummary
 				mu.Lock()
 				for _, summary := range summaries {
+					// Use organization from CKAN as agency fallback.
+					if summary.Agency == "" && job.organization != "" {
+						summary.Agency = job.organization
+					}
 					key := summary.ContractID + "|" + summary.ReleaseDate.Format("2006-01-02") + "|" + summary.Amount.StringFixed(2)
 					if _, ok := seen[key]; ok {
 						continue
@@ -505,8 +562,22 @@ func qldDownloadAndParse(ctx context.Context, jobs []qldDownloadJob, needed map[
 					seen[key] = struct{}{}
 					mk := monthKey(summary.ReleaseDate)
 					buckets[mk] = append(buckets[mk], summary)
+
+					// In verbose mode, stream matches as rows are parsed (per file),
+					// rather than waiting for window aggregation.
+					if req.Verbose && req.OnMatch != nil && matchesSummaryFilters(req, summary, time.Time{}) {
+						toStream = append(toStream, summary)
+					}
 				}
 				mu.Unlock()
+
+				if len(toStream) > 0 {
+					cbMu.Lock()
+					for _, summary := range toStream {
+						req.OnMatch(summary)
+					}
+					cbMu.Unlock()
+				}
 			}
 		}()
 	}
@@ -546,8 +617,21 @@ func qldDownloadAndParse(ctx context.Context, jobs []qldDownloadJob, needed map[
 	return buckets, nil
 }
 
-func qldDownload(ctx context.Context, client *http.Client, downloadURL string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+// qldDownloadCached downloads a resource, using cache when valid.
+func qldDownloadCached(ctx context.Context, client *http.Client, job qldDownloadJob) ([]byte, error) {
+	cachedPath := qldCachedFilePath(job.resourceID, job.format)
+
+	// Check if cache is valid.
+	if qldIsCacheValid(job) {
+		data, err := os.ReadFile(cachedPath)
+		if err == nil {
+			return data, nil
+		}
+		// Cache read failed, proceed to download.
+	}
+
+	// Download fresh.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, job.downloadURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -559,24 +643,85 @@ func qldDownload(ctx context.Context, client *http.Client, downloadURL string) (
 		return nil, err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("qld download %s: status %d", downloadURL, resp.StatusCode)
+		return nil, fmt.Errorf("qld download %s: status %d", job.downloadURL, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Write to cache.
+	if err := os.WriteFile(cachedPath, body, 0o644); err != nil {
+		// Log but don't fail - caching is best-effort.
+		fmt.Fprintf(os.Stderr, "qld cache write warning: %v\n", err)
+	} else {
+		// Save metadata.
+		hash := sha256.Sum256(body)
+		meta := &qldCacheMeta{
+			ResourceID:   job.resourceID,
+			URL:          job.downloadURL,
+			Format:       job.format,
+			LastModified: job.lastModified,
+			CachedAt:     time.Now().UTC(),
+			ETag:         resp.Header.Get("ETag"),
+			ContentHash:  hex.EncodeToString(hash[:]),
+		}
+		if err := qldSaveCacheMeta(meta); err != nil {
+			fmt.Fprintf(os.Stderr, "qld cache meta write warning: %v\n", err)
+		}
+	}
+
+	return body, nil
 }
 
 func qldParseTabular(job qldDownloadJob, body []byte, needed map[string]dateWindow) ([]MatchSummary, error) {
 	ext := strings.ToLower(job.format)
+
+	// Try the declared format first.
+	var results []MatchSummary
+	var err error
+
 	switch ext {
 	case "csv":
-		return qldParseCSV(job, body, needed)
+		results, err = qldParseCSV(job, body, needed)
 	case "xlsx":
-		return qldParseXLSX(job, body, needed)
+		results, err = qldParseXLSX(job, body, needed)
 	case "xls":
-		return qldParseXLS(job, body, needed)
+		results, err = qldParseXLS(job, body, needed)
 	default:
 		return nil, fmt.Errorf("unsupported qld format: %s", job.format)
 	}
+
+	if err == nil {
+		return results, nil
+	}
+
+	// If declared format fails, try other formats as fallback.
+	// This handles cases where CKAN metadata is wrong.
+	fallbackFormats := []string{"xlsx", "xls", "csv"}
+	for _, fallback := range fallbackFormats {
+		if fallback == ext {
+			continue // Already tried.
+		}
+		var fallbackErr error
+		switch fallback {
+		case "csv":
+			results, fallbackErr = qldParseCSV(job, body, needed)
+		case "xlsx":
+			results, fallbackErr = qldParseXLSX(job, body, needed)
+		case "xls":
+			results, fallbackErr = qldParseXLS(job, body, needed)
+		}
+		if fallbackErr == nil {
+			return results, nil
+		}
+	}
+
+	// All formats failed, return original error.
+	return nil, err
 }
 
 func qldParseCSV(job qldDownloadJob, body []byte, needed map[string]dateWindow) ([]MatchSummary, error) {
@@ -1002,23 +1147,6 @@ func parseQldDate(raw string) time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-func qldFileExt(u string) string {
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return ""
-	}
-	ext := strings.ToLower(strings.TrimPrefix(path.Ext(parsed.Path), "."))
-	if ext == "" {
-		return ""
-	}
-	switch ext {
-	case "csv", "xlsx", "xls":
-		return ext
-	default:
-		return ""
-	}
 }
 
 func monthKey(t time.Time) string {
