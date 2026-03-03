@@ -2,83 +2,223 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestQldDiscoverDownloadJobs_FollowsPaginationAndFindsDownloads(t *testing.T) {
-	var srv *httptest.Server
-	mux := http.NewServeMux()
+func TestQldDiscoverResourcesViaCKAN(t *testing.T) {
+	// Mock CKAN API response.
+	mockResponse := CKANResponse[CKANPackageSearchResult]{
+		Success: true,
+		Result: CKANPackageSearchResult{
+			Count: 2,
+			Results: []CKANPackage{
+				{
+					ID:    "pkg-1",
+					Name:  "agency-a-contracts",
+					Title: "Agency A Contract Disclosure",
+					Organization: &CKANOrg{
+						ID:    "org-1",
+						Name:  "agency-a",
+						Title: "Agency A",
+					},
+					Resources: []CKANResource{
+						{
+							ID:           "res-1",
+							PackageID:    "pkg-1",
+							Name:         "FY 2024-25 Contracts",
+							URL:          "https://example.test/contracts-2024.csv",
+							Format:       "CSV",
+							LastModified: "2024-07-15T10:00:00",
+						},
+						{
+							ID:           "res-2",
+							PackageID:    "pkg-1",
+							Name:         "FY 2023-24 Contracts",
+							URL:          "https://example.test/contracts-2023.xlsx",
+							Format:       "XLSX",
+							LastModified: "2023-08-01T12:00:00",
+						},
+					},
+				},
+				{
+					ID:    "pkg-2",
+					Name:  "agency-b-contracts",
+					Title: "Agency B Contract Disclosure",
+					Organization: &CKANOrg{
+						ID:    "org-2",
+						Name:  "agency-b",
+						Title: "Agency B",
+					},
+					Resources: []CKANResource{
+						{
+							ID:           "res-3",
+							PackageID:    "pkg-2",
+							Name:         "Contract Register",
+							URL:          "https://example.test/register.xls",
+							Format:       "XLS",
+							LastModified: "2024-06-01T09:00:00",
+						},
+						{
+							ID:           "res-4",
+							PackageID:    "pkg-2",
+							Name:         "PDF Report",
+							URL:          "https://example.test/report.pdf",
+							Format:       "PDF",
+							LastModified: "2024-06-01T09:00:00",
+						},
+					},
+				},
+			},
+		},
+	}
 
-	mux.HandleFunc("/dataset/", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("q")
-		page := r.URL.Query().Get("page")
-		if !strings.Contains(q, "contract") {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`<html><body>nope</body></html>`))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/3/action/package_search" {
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		switch page {
-		case "1":
-			_, _ = w.Write([]byte(`
-<html><body>
-<a href="/dataset/ds-one">dataset one</a>
-<a href="/dataset/?q=contract+disclosure&page=2">next</a>
-</body></html>`))
-		case "2":
-			_, _ = w.Write([]byte(`
-<html><body>
-<a href="/dataset/ds-two">dataset two</a>
-</body></html>`))
-		default:
-			_, _ = w.Write([]byte(`<html><body></body></html>`))
-		}
-	})
-
-	mux.HandleFunc("/dataset/ds-one", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`
-<html><body>
-<a href="/dataset/ds-one/resource/res-1">resource 1</a>
-</body></html>`))
-	})
-	mux.HandleFunc("/dataset/ds-two", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`
-<html><body>
-<a href="/dataset/ds-two/resource/res-2">resource 2</a>
-</body></html>`))
-	})
-
-	mux.HandleFunc("/dataset/ds-one/resource/res-1", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`
-<html><body>
-<a href="/dataset/uuid-1/resource/res-1/download/contracts.csv">Download CSV</a>
-</body></html>`))
-	})
-	mux.HandleFunc("/dataset/ds-two/resource/res-2", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`
-<html><body>
-<a href="/dataset/uuid-2/resource/res-2/download/contracts.xlsx">Download XLSX</a>
-</body></html>`))
-	})
-
-	srv = httptest.NewServer(mux)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(mockResponse)
+	}))
 	defer srv.Close()
 
+	client := NewCKANClient(srv.URL, "")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	jobs, err := qldDiscoverDownloadJobs(ctx, srv.URL, srv.URL+"/dataset/?q=contract+disclosure&page=1")
+	jobs, err := qldDiscoverResourcesViaCKAN(ctx, client)
 	require.NoError(t, err)
-	require.Len(t, jobs, 2)
+	// Should only include CSV, XLSX, XLS - not PDF.
+	require.Len(t, jobs, 3)
 
-	urls := []string{jobs[0].downloadURL, jobs[1].downloadURL}
-	require.Contains(t, urls, srv.URL+"/dataset/uuid-1/resource/res-1/download/contracts.csv")
-	require.Contains(t, urls, srv.URL+"/dataset/uuid-2/resource/res-2/download/contracts.xlsx")
+	// Verify job details.
+	jobByID := make(map[string]qldDownloadJob)
+	for _, job := range jobs {
+		jobByID[job.resourceID] = job
+	}
+
+	require.Contains(t, jobByID, "res-1")
+	require.Equal(t, "csv", jobByID["res-1"].format)
+	require.Equal(t, "Agency A", jobByID["res-1"].organization)
+
+	require.Contains(t, jobByID, "res-2")
+	require.Equal(t, "xlsx", jobByID["res-2"].format)
+
+	require.Contains(t, jobByID, "res-3")
+	require.Equal(t, "xls", jobByID["res-3"].format)
+	require.Equal(t, "Agency B", jobByID["res-3"].organization)
+
+	// PDF should be excluded.
+	require.NotContains(t, jobByID, "res-4")
+}
+
+func TestQldCKANClient_Pagination(t *testing.T) {
+	// Simulate paginated CKAN API responses.
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/3/action/package_search" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		callCount++
+		start := r.URL.Query().Get("start")
+		rows := r.URL.Query().Get("rows")
+		require.Equal(t, "100", rows)
+
+		var response CKANResponse[CKANPackageSearchResult]
+		response.Success = true
+		response.Result.Count = 150
+
+		if start == "0" {
+			// First page: return 100 packages with unique IDs.
+			for i := 0; i < 100; i++ {
+				resID := "res-page1-" + string(rune('0'+i/100)) + string(rune('0'+(i/10)%10)) + string(rune('0'+i%10))
+				response.Result.Results = append(response.Result.Results, CKANPackage{
+					ID:   "pkg-page1-" + resID,
+					Name: "dataset-page1-" + resID,
+					Resources: []CKANResource{{
+						ID:     resID,
+						URL:    "https://example.test/file-" + resID + ".csv",
+						Format: "CSV",
+					}},
+				})
+			}
+		} else if start == "100" {
+			// Second page: return 50 packages with unique IDs.
+			for i := 0; i < 50; i++ {
+				resID := "res-page2-" + string(rune('0'+i/100)) + string(rune('0'+(i/10)%10)) + string(rune('0'+i%10))
+				response.Result.Results = append(response.Result.Results, CKANPackage{
+					ID:   "pkg-page2-" + resID,
+					Name: "dataset-page2-" + resID,
+					Resources: []CKANResource{{
+						ID:     resID,
+						URL:    "https://example.test/file2-" + resID + ".csv",
+						Format: "CSV",
+					}},
+				})
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer srv.Close()
+
+	client := NewCKANClient(srv.URL, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	jobs, err := qldDiscoverResourcesViaCKAN(ctx, client)
+	require.NoError(t, err)
+	require.Equal(t, 2, callCount, "Should make 2 API calls for pagination")
+	require.Len(t, jobs, 150)
+}
+
+func TestQldCKANClient_WithToken(t *testing.T) {
+	var receivedToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedToken = r.Header.Get("Authorization")
+		response := CKANResponse[CKANPackageSearchResult]{
+			Success: true,
+			Result:  CKANPackageSearchResult{Count: 0, Results: []CKANPackage{}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer srv.Close()
+
+	client := NewCKANClient(srv.URL, "test-token-123")
+	ctx := context.Background()
+
+	_, err := client.PackageSearch(ctx, "test", 10, 0)
+	require.NoError(t, err)
+	require.Equal(t, "test-token-123", receivedToken)
+}
+
+func TestParseQldCKANTime(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected time.Time
+	}{
+		{"2024-07-15T10:30:00.123456", time.Date(2024, 7, 15, 10, 30, 0, 123456000, time.UTC)},
+		{"2024-07-15T10:30:00", time.Date(2024, 7, 15, 10, 30, 0, 0, time.UTC)},
+		{"2024-07-15", time.Date(2024, 7, 15, 0, 0, 0, 0, time.UTC)},
+		{"", time.Time{}},
+		{"invalid", time.Time{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := parseQldCKANTime(tt.input)
+			require.Equal(t, tt.expected, got)
+		})
+	}
 }
 
 func TestQldParseCSV_MapsFieldsAndFiltersByWindow(t *testing.T) {
