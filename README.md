@@ -71,6 +71,10 @@ Prerequisites: Go 1.25+, a browser, and optionally [Task](https://taskfile.dev/#
 - Individual modules: `task collector:test`, `task server:test`, `task infra:test`
 - Inspect coverage: `go tool cover -html=coverage/combined.out`
 
+## Deployment
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full deployment guide covering local development, Docker, AWS Serverless (Lambda + CloudFront), Fly.io, ECS Fargate, and CI/CD automation.
+
 ## Architecture Overview
 - Collector streams OCDS releases into a lake partitioned by FY/month/agency/company; concurrent runs skip existing month partitions. Cache lives under `~/.cache/austender` unless overridden.
 - Server normalizes requests into `collector.SearchRequest`, layers a same-day in-memory cache on top of the lake, and powers REST + MCP + LLM endpoints with consistent behavior.
