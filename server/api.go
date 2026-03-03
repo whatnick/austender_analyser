@@ -354,6 +354,7 @@ func parseRequestDate(raw string) (time.Time, error) {
 
 func RegisterHandlers() {
 	http.HandleFunc("/api/scrape", scrapeHandler)
+	http.HandleFunc("/api/search", searchHandler)
 	mcpHandler := buildMCPHTTPHandler()
 	http.Handle("/api/mcp", mcpHandler)
 	http.Handle("/api/mcp/", mcpHandler)

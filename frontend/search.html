@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Austender Spend Search</title>
+    <script src="./config.local.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        body { background: linear-gradient(135deg, #f7f9fc 0%, #eef2f7 100%); }
+        .search-card { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08); border: none; }
+        .total-spend { font-size: 2rem; font-weight: 700; color: #198754; }
+        .table-hover tbody tr:hover { background-color: rgba(25, 135, 84, 0.05); }
+        .sort-btn { cursor: pointer; user-select: none; }
+        .sort-btn:hover { text-decoration: underline; }
+        .sort-btn::after { content: ' ⇅'; opacity: 0.3; }
+        .sort-btn.asc::after { content: ' ↑'; opacity: 1; }
+        .sort-btn.desc::after { content: ' ↓'; opacity: 1; }
+        #results-table { font-size: 0.9rem; }
+        .spinner-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(255,255,255,0.8); display: flex; align-items: center;
+            justify-content: center; z-index: 10; border-radius: 0.375rem; }
+    </style>
+</head>
+<body>
+<div class="container py-4" style="max-width: 1200px;">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h3 class="mb-0">🔍 Austender Spend Search</h3>
+        <a href="index.html" class="btn btn-outline-secondary btn-sm">💬 Chat Mode</a>
+    </div>
+
+    <!-- Search Form -->
+    <div class="card search-card mb-4">
+        <div class="card-body">
+            <form id="search-form">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label for="keyword" class="form-label">Keyword</label>
+                        <input type="text" class="form-control" id="keyword" placeholder="e.g. KPMG, consulting">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="company" class="form-label">Company / Supplier</label>
+                        <input type="text" class="form-control" id="company" placeholder="e.g. Accenture">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="agency" class="form-label">Agency / Department</label>
+                        <input type="text" class="form-control" id="agency" placeholder="e.g. Defence">
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-md-3">
+                        <label for="source" class="form-label">Jurisdiction</label>
+                        <select class="form-select" id="source">
+                            <option value="">All Sources</option>
+                            <option value="federal" selected>Federal</option>
+                            <option value="nsw">NSW</option>
+                            <option value="vic">VIC</option>
+                            <option value="sa">SA</option>
+                            <option value="wa">WA</option>
+                            <option value="qld">QLD</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="startDate" class="form-label">Start Date</label>
+                        <input type="date" class="form-control" id="startDate">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="endDate" class="form-label">End Date</label>
+                        <input type="date" class="form-control" id="endDate">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="limit" class="form-label">Max Results</label>
+                        <select class="form-select" id="limit">
+                            <option value="50">50</option>
+                            <option value="100" selected>100</option>
+                            <option value="250">250</option>
+                            <option value="500">500</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mt-3 d-flex gap-2">
+                    <button type="submit" class="btn btn-success" id="search-btn">
+                        <span id="search-text">Search Contracts</span>
+                        <span id="search-spinner" class="spinner-border spinner-border-sm d-none" role="status"></span>
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" id="export-csv-btn" disabled>
+                        📥 Export CSV
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Summary -->
+    <div id="summary-panel" class="d-none mb-4">
+        <div class="row g-3">
+            <div class="col-md-4">
+                <div class="card text-center">
+                    <div class="card-body">
+                        <div class="text-muted small">Total Spend</div>
+                        <div class="total-spend" id="total-spend">$0</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-center">
+                    <div class="card-body">
+                        <div class="text-muted small">Contracts Found</div>
+                        <div class="total-spend" id="total-count" style="color: #0d6efd;">0</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-center">
+                    <div class="card-body">
+                        <div class="text-muted small">Query Time</div>
+                        <div class="total-spend" id="query-time" style="color: #6c757d; font-size: 1.5rem;">-</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Table -->
+    <div id="results-panel" class="d-none">
+        <div class="card search-card position-relative">
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0" id="results-table">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="sort-btn" data-col="supplier">Supplier</th>
+                                <th class="sort-btn" data-col="agency">Agency</th>
+                                <th class="sort-btn" data-col="title">Title</th>
+                                <th class="sort-btn" data-col="amount" style="text-align:right;">Amount</th>
+                                <th class="sort-btn" data-col="releaseDate">Date</th>
+                                <th class="sort-btn" data-col="source">Source</th>
+                            </tr>
+                        </thead>
+                        <tbody id="results-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Empty / Error State -->
+    <div id="empty-state" class="text-center text-muted py-5">
+        <h5>Enter a keyword, company, or agency to search government contracts</h5>
+        <p>Data is sourced from the local Parquet lake cache.</p>
+    </div>
+    <div id="error-state" class="alert alert-danger d-none"></div>
+</div>
+
+<script>
+const apiBase = (window.APP_CONFIG && window.APP_CONFIG.apiBase) || 'http://localhost:8080';
+let currentData = [];
+let sortCol = 'amount';
+let sortDir = 'desc';
+
+document.getElementById('search-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await doSearch();
+});
+
+async function doSearch() {
+    const btn = document.getElementById('search-btn');
+    const spinner = document.getElementById('search-spinner');
+    const text = document.getElementById('search-text');
+    btn.disabled = true;
+    spinner.classList.remove('d-none');
+    text.textContent = 'Searching…';
+
+    document.getElementById('error-state').classList.add('d-none');
+    document.getElementById('empty-state').classList.add('d-none');
+
+    const payload = {
+        keyword: document.getElementById('keyword').value.trim(),
+        company: document.getElementById('company').value.trim(),
+        agency: document.getElementById('agency').value.trim(),
+        source: document.getElementById('source').value,
+        startDate: document.getElementById('startDate').value,
+        endDate: document.getElementById('endDate').value,
+        limit: parseInt(document.getElementById('limit').value, 10),
+    };
+
+    const t0 = performance.now();
+    try {
+        const resp = await fetch(`${apiBase}/api/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ error: resp.statusText }));
+            throw new Error(err.error || 'Search failed');
+        }
+
+        const data = await resp.json();
+        currentData = data.contracts || [];
+        showSummary(data.totalSpend, data.count, elapsed);
+        renderTable();
+        document.getElementById('export-csv-btn').disabled = currentData.length === 0;
+    } catch (err) {
+        document.getElementById('error-state').textContent = err.message;
+        document.getElementById('error-state').classList.remove('d-none');
+        document.getElementById('summary-panel').classList.add('d-none');
+        document.getElementById('results-panel').classList.add('d-none');
+    } finally {
+        btn.disabled = false;
+        spinner.classList.add('d-none');
+        text.textContent = 'Search Contracts';
+    }
+}
+
+function showSummary(totalSpend, count, elapsed) {
+    document.getElementById('summary-panel').classList.remove('d-none');
+    document.getElementById('total-spend').textContent = formatCurrency(totalSpend);
+    document.getElementById('total-count').textContent = count.toLocaleString();
+    document.getElementById('query-time').textContent = `${elapsed}s`;
+}
+
+function renderTable() {
+    const sorted = [...currentData].sort((a, b) => {
+        let va = a[sortCol], vb = b[sortCol];
+        if (typeof va === 'string') { va = va.toLowerCase(); vb = (vb || '').toLowerCase(); }
+        if (va < vb) return sortDir === 'asc' ? -1 : 1;
+        if (va > vb) return sortDir === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    const tbody = document.getElementById('results-body');
+    tbody.innerHTML = sorted.map(c => `
+        <tr>
+            <td>${esc(c.supplier)}</td>
+            <td>${esc(c.agency)}</td>
+            <td title="${esc(c.title)}">${esc(truncate(c.title, 60))}</td>
+            <td style="text-align:right; white-space:nowrap;">${formatCurrency(c.amount)}</td>
+            <td>${esc(c.releaseDate || '-')}</td>
+            <td><span class="badge bg-secondary">${esc(c.source || '-')}</span></td>
+        </tr>
+    `).join('');
+
+    document.getElementById('results-panel').classList.remove('d-none');
+
+    // Update sort indicators
+    document.querySelectorAll('.sort-btn').forEach(el => {
+        el.classList.remove('asc', 'desc');
+        if (el.dataset.col === sortCol) el.classList.add(sortDir);
+    });
+}
+
+// Column sorting
+document.querySelectorAll('.sort-btn').forEach(el => {
+    el.addEventListener('click', () => {
+        const col = el.dataset.col;
+        if (sortCol === col) {
+            sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+            sortCol = col;
+            sortDir = col === 'amount' ? 'desc' : 'asc';
+        }
+        renderTable();
+    });
+});
+
+// CSV export
+document.getElementById('export-csv-btn').addEventListener('click', () => {
+    if (!currentData.length) return;
+    const headers = ['Supplier', 'Agency', 'Title', 'Amount', 'Date', 'Source', 'ContractID', 'OCID'];
+    const rows = currentData.map(c => [
+        csvEsc(c.supplier), csvEsc(c.agency), csvEsc(c.title),
+        c.amount, c.releaseDate || '', c.source || '',
+        c.contractId || '', c.ocid || ''
+    ]);
+    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `austender-search-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+});
+
+function formatCurrency(v) {
+    return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(v || 0);
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+function truncate(s, n) { return (s && s.length > n) ? s.slice(0, n) + '…' : (s || ''); }
+function csvEsc(s) { s = (s || '').replace(/"/g, '""'); return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s}"` : s; }
+</script>
+</body>
+</html>

@@ -300,6 +300,190 @@ func sumParquetFile(path string, filters SearchRequest) (decimal.Decimal, bool, 
 	return total, matched, nil
 }
 
+// ContractRecord is a single contract row returned by QueryContracts.
+type ContractRecord struct {
+	ContractID    string  `json:"contractId"`
+	ReleaseID     string  `json:"releaseId,omitempty"`
+	OCID          string  `json:"ocid,omitempty"`
+	Source        string  `json:"source"`
+	Supplier      string  `json:"supplier"`
+	Agency        string  `json:"agency"`
+	Title         string  `json:"title"`
+	Amount        float64 `json:"amount"`
+	FinancialYear string  `json:"financialYear,omitempty"`
+	ReleaseDate   string  `json:"releaseDate,omitempty"`
+	IsUpdate      bool    `json:"isUpdate,omitempty"`
+}
+
+// ContractSearchResult holds structured search output.
+type ContractSearchResult struct {
+	Contracts  []ContractRecord `json:"contracts"`
+	TotalSpend float64          `json:"totalSpend"`
+	Count      int              `json:"count"`
+}
+
+// QueryContracts returns individual contract records from the Parquet lake.
+func QueryContracts(ctx context.Context, filters SearchRequest, limit int) (ContractSearchResult, error) {
+	cacheDir := defaultCacheDir()
+	dbPath := filepath.Join(cacheDir, "catalog.sqlite")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return ContractSearchResult{}, err
+	}
+	defer db.Close()
+
+	lake := newDataLake(filepath.Join(cacheDir), db)
+	if schemaErr := lake.ensureSchema(); schemaErr != nil {
+		return ContractSearchResult{}, schemaErr
+	}
+
+	return lake.queryContracts(ctx, filters, limit)
+}
+
+// queryContracts reads individual rows from candidate parquet files.
+func (l *dataLake) queryContracts(ctx context.Context, filters SearchRequest, limit int) (ContractSearchResult, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	// Build SQL WHERE for index lookup (same as queryTotals).
+	var args []any
+	var clauses []string
+	if src := strings.TrimSpace(filters.Source); src != "" {
+		sourceKey := sanitizePartitionComponent(normalizeSourceID(src))
+		clauses = append(clauses, "source = ?")
+		args = append(args, sourceKey)
+	}
+	if strings.TrimSpace(filters.Agency) != "" {
+		agencyKey := sanitizePartitionComponent(filters.Agency)
+		clauses = append(clauses, "agency_key LIKE ?")
+		args = append(args, "%"+agencyKey+"%")
+	}
+	if strings.TrimSpace(filters.Company) != "" {
+		companyKey := sanitizePartitionComponent(filters.Company)
+		clauses = append(clauses, "company_key LIKE ?")
+		args = append(args, "%"+companyKey+"%")
+	}
+	if filters.LookbackPeriod > 0 {
+		minFy := strings.TrimPrefix(financialYearLabel(time.Now().AddDate(-filters.LookbackPeriod, 0, 0)), "fy=")
+		clauses = append(clauses, "fy >= ?")
+		args = append(args, minFy)
+	}
+
+	where := ""
+	if len(clauses) > 0 {
+		where = "WHERE " + strings.Join(clauses, " AND ")
+	}
+	query := fmt.Sprintf("SELECT path FROM parquet_files %s", where)
+	rows, err := l.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return ContractSearchResult{}, err
+	}
+	defer rows.Close()
+
+	var result ContractSearchResult
+	totalSpend := decimal.Zero
+	seen := make(map[string]struct{})
+
+	for rows.Next() {
+		if len(result.Contracts) >= limit {
+			break
+		}
+		var path string
+		if scanErr := rows.Scan(&path); scanErr != nil {
+			continue
+		}
+		records, spend, scanErr := readParquetContracts(path, filters, limit-len(result.Contracts), seen)
+		if scanErr != nil {
+			continue
+		}
+		result.Contracts = append(result.Contracts, records...)
+		totalSpend = totalSpend.Add(spend)
+	}
+
+	result.Count = len(result.Contracts)
+	result.TotalSpend, _ = totalSpend.Float64()
+	return result, nil
+}
+
+// readParquetContracts reads matching rows from a single parquet file up to limit.
+// seen tracks already-emitted ContractIDs to avoid duplicates across files.
+func readParquetContracts(path string, filters SearchRequest, limit int, seen map[string]struct{}) ([]ContractRecord, decimal.Decimal, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, decimal.Zero, err
+	}
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		_ = f.Close()
+		return nil, decimal.Zero, err
+	}
+	var r *parquet.GenericReader[parquetRow]
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				r = nil
+			}
+		}()
+		r = parquet.NewGenericReader[parquetRow](f)
+	}()
+	if r == nil {
+		_ = f.Close()
+		return nil, decimal.Zero, fmt.Errorf("parquet reader init failed")
+	}
+
+	var records []ContractRecord
+	spend := decimal.Zero
+	batch := make([]parquetRow, 1024)
+	for {
+		n, readErr := r.Read(batch)
+		if n > 0 {
+			for _, row := range batch[:n] {
+				if rowMatches(row, filters) {
+					// Deduplicate by ContractID+Source to keep latest version
+					deduKey := row.ContractID + "|" + row.Source
+					if _, dup := seen[deduKey]; dup {
+						continue
+					}
+					seen[deduKey] = struct{}{}
+					releaseDate := ""
+					if row.ReleaseEpoch > 0 {
+						releaseDate = time.Unix(0, row.ReleaseEpoch*int64(time.Millisecond)).UTC().Format("2006-01-02")
+					}
+					records = append(records, ContractRecord{
+						ContractID:    row.ContractID,
+						ReleaseID:     row.ReleaseID,
+						OCID:          row.OCID,
+						Source:        row.Source,
+						Supplier:      row.Supplier,
+						Agency:        row.Agency,
+						Title:         row.Title,
+						Amount:        row.Amount,
+						FinancialYear: row.FinancialYear,
+						ReleaseDate:   releaseDate,
+						IsUpdate:      row.IsUpdate,
+					})
+					spend = spend.Add(decimal.NewFromFloat(row.Amount))
+					if len(records) >= limit {
+						_ = r.Close()
+						_ = f.Close()
+						return records, spend, nil
+					}
+				}
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	_ = r.Close()
+	_ = f.Close()
+	return records, spend, nil
+}
+
 // hasMonthPartition returns true if a month partition already contains parquet files.
 func (l *dataLake) hasMonthPartition(source string, ts time.Time) bool {
 	sourceKey := sanitizePartitionComponent(normalizeSourceID(source))

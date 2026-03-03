@@ -1,5 +1,10 @@
-//go:build llama_integration && llamacpp
-// +build llama_integration,llamacpp
+//go:build ignore
+// +build ignore
+
+// This file is excluded from normal builds because the llamacpp package was
+// removed from langchaingo v0.1.14+. It is kept as a reference for future
+// local-LLM integration tests. To re-enable, replace the llamacpp import with
+// an available local-model provider and change the build tag.
 
 package main
 
@@ -9,45 +14,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/llamacpp"
 )
 
-// This test is opt-in (build tag `llama_integration`) and exercises the /api/llm endpoint
-// using a local CPU-only llamacpp model, overriding the LLM constructor.
-func TestLLMHandlerWithLlamaCPP(t *testing.T) {
+// TestLLMHandlerWithLocalModel is a placeholder for future local-LLM integration tests.
+func TestLLMHandlerWithLocalModel(t *testing.T) {
 	if os.Getenv("LOCAL_LLM") == "" {
-		t.Skip("LOCAL_LLM not set; skipping CPU-only llamacpp integration test")
+		t.Skip("LOCAL_LLM not set; skipping local-model integration test")
 	}
-
-	modelPath := os.Getenv("LOCAL_LLM_MODEL")
-	if modelPath == "" {
-		modelPath = filepath.Join("./models", "tinyllama-1.1b-chat.gguf")
-	}
-	if _, err := os.Stat(modelPath); err != nil {
-		t.Skipf("model not present at %s; skipping", modelPath)
-	}
-
-	// Override LLM factory to use local llamacpp.
-	oldFactory := newLLMClient
-	newLLMClient = func(_ string, _ string) (llms.Model, error) {
-		return llamacpp.New(
-			llamacpp.WithModelPath(modelPath),
-			llamacpp.WithPredictTokens(32),
-			llamacpp.WithTemperature(0.1),
-		)
-	}
-	defer func() { newLLMClient = oldFactory }()
 
 	srv := httptest.NewServer(http.HandlerFunc(llmHandler))
 	defer srv.Close()
 
 	payload := map[string]any{
-		"prompt": "Hello from llamacpp",
+		"prompt": "Hello from local model",
 	}
 	body, _ := json.Marshal(payload)
 
