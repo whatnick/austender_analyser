@@ -26,6 +26,12 @@ includes:
     taskfile: ./collector/Taskfile.yml
     dir: ./collector
 tasks:
+  build:all:
+    desc: Build collector and server binaries
+    cmds:
+      - task: collector:build
+      - task: server:build
+
   run:server:
     desc: Run the local API server on :8080
     cmds:
@@ -55,6 +61,16 @@ tasks:
     desc: Run tests across collector, server, and infra with merged coverage
     cmds:
       - task: coverage:stack
+
+  test:frontend:
+    desc: Serve the static frontend briefly and verify key pages and endpoint wiring
+    cmds:
+      - bash ./hack/test-frontend.sh
+
+  smoke:clickhouse:
+    desc: Run ClickHouse-backed collector and server smoke tests
+    cmds:
+      - bash ./hack/smoke-clickhouse.sh
 
   coverage:collector:
     desc: Run collector coverage and stage profile into ./coverage

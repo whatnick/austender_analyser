@@ -13,8 +13,44 @@ import (
 	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/parquet-go/parquet-go"
+	"github.com/parquet-go/parquet-go/compress/snappy"
 	collector "github.com/whatnick/austender_analyser/collector/cmd"
 )
+
+type testParquetRow struct {
+	Partition     string  `parquet:"name=partition, type=BYTE_ARRAY, convertedtype=UTF8"`
+	Source        string  `parquet:"name=source, type=BYTE_ARRAY, convertedtype=UTF8"`
+	FinancialYear string  `parquet:"name=financial_year, type=BYTE_ARRAY, convertedtype=UTF8"`
+	AgencyKey     string  `parquet:"name=agency_key, type=BYTE_ARRAY, convertedtype=UTF8"`
+	CompanyKey    string  `parquet:"name=company_key, type=BYTE_ARRAY, convertedtype=UTF8"`
+	ContractID    string  `parquet:"name=contract_id, type=BYTE_ARRAY, convertedtype=UTF8"`
+	ReleaseID     string  `parquet:"name=release_id, type=BYTE_ARRAY, convertedtype=UTF8"`
+	OCID          string  `parquet:"name=ocid, type=BYTE_ARRAY, convertedtype=UTF8"`
+	Supplier      string  `parquet:"name=supplier, type=BYTE_ARRAY, convertedtype=UTF8"`
+	Agency        string  `parquet:"name=agency, type=BYTE_ARRAY, convertedtype=UTF8"`
+	Title         string  `parquet:"name=title, type=BYTE_ARRAY, convertedtype=UTF8"`
+	Amount        float64 `parquet:"name=amount, type=DOUBLE"`
+	ReleaseEpoch  int64   `parquet:"name=release_epoch_ms, type=INT64, logicaltype=TIMESTAMP_MILLIS"`
+	IsUpdate      bool    `parquet:"name=is_update, type=BOOLEAN"`
+}
+
+type testIndexFile struct {
+	Path          string `json:"path"`
+	Source        string `json:"source"`
+	FinancialYear string `json:"financialYear"`
+	Month         string `json:"month,omitempty"`
+	AgencyKey     string `json:"agencyKey"`
+	AgencyName    string `json:"agencyName,omitempty"`
+	CompanyKey    string `json:"companyKey"`
+	CompanyName   string `json:"companyName,omitempty"`
+	RowCount      int64  `json:"rowCount"`
+}
+
+type testIndexState struct {
+	Version int                      `json:"version"`
+	Files   map[string]testIndexFile `json:"files"`
+}
 
 type reqBody struct {
 	Keyword        string `json:"keyword"`
@@ -220,6 +256,45 @@ func TestScrapeHandler_InvalidDate(t *testing.T) {
 	}
 }
 
+func TestSearchHandler_ClickHouseCacheSmoke(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("AUSTENDER_CACHE_DIR", cacheDir)
+	writeSearchCacheFixture(t, cacheDir)
+
+	w := httptest.NewRecorder()
+	body, _ := json.Marshal(SearchHandlerRequest{Keyword: "clickhouse", Source: "federal", Limit: 10})
+	r := httptest.NewRequest(http.MethodPost, "/api/search", bytes.NewReader(body))
+
+	searchHandler(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var resp collector.ContractSearchResult
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if resp.Count != 1 {
+		t.Fatalf("expected 1 contract, got %d", resp.Count)
+	}
+	if len(resp.Contracts) != 1 {
+		t.Fatalf("expected 1 contract record, got %d", len(resp.Contracts))
+	}
+	if resp.Contracts[0].Agency != "Department of Defence" {
+		t.Fatalf("unexpected agency: %s", resp.Contracts[0].Agency)
+	}
+	if resp.Contracts[0].Supplier != "KPMG" {
+		t.Fatalf("unexpected supplier: %s", resp.Contracts[0].Supplier)
+	}
+	if resp.Contracts[0].Title != "ClickHouse Search Smoke" {
+		t.Fatalf("unexpected title: %s", resp.Contracts[0].Title)
+	}
+	if resp.TotalSpend != 123.45 {
+		t.Fatalf("unexpected total spend: %v", resp.TotalSpend)
+	}
+}
+
 func TestMCPStreamable_ListTools(t *testing.T) {
 	handler := buildMCPHTTPHandler()
 	sessionID := initializeTestMCPSession(t, handler)
@@ -276,25 +351,73 @@ func TestMCPStreamable_ListTools(t *testing.T) {
 
 func writeTestCatalog(t *testing.T, cacheDir string) {
 	t.Helper()
-	type testIndexFile struct {
-		Path          string `json:"path"`
-		Source        string `json:"source"`
-		FinancialYear string `json:"financialYear"`
-		AgencyKey     string `json:"agencyKey"`
-		AgencyName    string `json:"agencyName,omitempty"`
-		CompanyKey    string `json:"companyKey"`
-		CompanyName   string `json:"companyName,omitempty"`
-		RowCount      int64  `json:"rowCount"`
-	}
-	type testIndexState struct {
-		Version int                      `json:"version"`
-		Files   map[string]testIndexFile `json:"files"`
-	}
 	data, err := json.MarshalIndent(testIndexState{
 		Version: 1,
 		Files: map[string]testIndexFile{
 			"p1": {Path: "p1", Source: "federal", FinancialYear: "2024-25", AgencyKey: "department_of_defence", AgencyName: "Department of Defence", CompanyKey: "acme", CompanyName: "Acme Pty Ltd", RowCount: 100},
 			"p2": {Path: "p2", Source: "federal", FinancialYear: "2024-25", AgencyKey: "ato", AgencyName: "Australian Taxation Office", CompanyKey: "kpmg", CompanyName: "KPMG", RowCount: 50},
+		},
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "clickhouse-index.json"), data, 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+}
+
+func writeSearchCacheFixture(t *testing.T, cacheDir string) {
+	t.Helper()
+	releaseDate := time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC)
+	parquetPath := filepath.Join(cacheDir, "lake", "source=federal", "fy=2023-24", "month=2024-01", "agency=department_of_defence", "company=kpmg", "part-1.parquet")
+	if err := os.MkdirAll(filepath.Dir(parquetPath), 0o755); err != nil {
+		t.Fatalf("mkdir parquet dir: %v", err)
+	}
+	file, err := os.Create(parquetPath)
+	if err != nil {
+		t.Fatalf("create parquet: %v", err)
+	}
+	writer := parquet.NewGenericWriter[testParquetRow](file, parquet.Compression(&snappy.Codec{}))
+	_, err = writer.Write([]testParquetRow{{
+		Partition:     "source=federal/fy=2023-24/month=2024-01/agency=department_of_defence/company=kpmg",
+		Source:        "federal",
+		FinancialYear: "2023-24",
+		AgencyKey:     "department_of_defence",
+		CompanyKey:    "kpmg",
+		ContractID:    "CN-SEARCH",
+		ReleaseID:     "rel-search",
+		OCID:          "ocds-search",
+		Supplier:      "KPMG",
+		Agency:        "Department of Defence",
+		Title:         "ClickHouse Search Smoke",
+		Amount:        123.45,
+		ReleaseEpoch:  releaseDate.UnixMilli(),
+		IsUpdate:      false,
+	}})
+	if err != nil {
+		t.Fatalf("write parquet rows: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close parquet writer: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close parquet file: %v", err)
+	}
+
+	data, err := json.MarshalIndent(testIndexState{
+		Version: 1,
+		Files: map[string]testIndexFile{
+			parquetPath: {
+				Path:          parquetPath,
+				Source:        "federal",
+				FinancialYear: "2023-24",
+				Month:         "month=2024-01",
+				AgencyKey:     "department_of_defence",
+				AgencyName:    "Department of Defence",
+				CompanyKey:    "kpmg",
+				CompanyName:   "KPMG",
+				RowCount:      1,
+			},
 		},
 	}, "", "  ")
 	if err != nil {

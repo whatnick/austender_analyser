@@ -4,6 +4,9 @@ Target: **≥90% coverage** across Go modules (`collector/`, `server/`, `infra/`
 
 ## Quick Commands
 - Repo aggregate (runs all module tests, merges coverage): `task test:all`
+- Build collector + server binaries: `task build:all`
+- Frontend smoke: `task test:frontend`
+- ClickHouse smoke: `task smoke:clickhouse`
 - Merge-only helper when profiles already exist: `task coverage:stack`
 - Module-specific coverage runners:
   - Collector: `task collector:test`
@@ -27,6 +30,8 @@ Goal: run `/api/llm` end-to-end without GPU by pairing langchaingo with a tiny G
 
 ## CI Recommendations
 - Add coverage enforcement that parses `go tool cover -func coverage/combined.out` and fails when any module drops below 90% coverage.
+- Install `clickhouse-local` in CI and run `task smoke:clickhouse` to verify the local columnar query path and the server search path against a temp lake.
+- Run `task test:frontend` in CI because the frontend is static and does not participate in Go coverage.
 - Provide an opt-in `llm-integration` job guarded by `LOCAL_LLM=1` for smoke testing local models without blocking standard PR checks.
 
 ## Next Steps

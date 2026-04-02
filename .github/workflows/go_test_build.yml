@@ -1,4 +1,4 @@
-name: Go Tests & Coverage
+name: Build, Test & Smoke
 
 on:
   push:
@@ -26,6 +26,9 @@ jobs:
       - name: Run stack coverage
         run: task coverage:stack
 
+      - name: Frontend smoke
+        run: task test:frontend
+
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -44,3 +47,58 @@ jobs:
           fail_ci_if_error: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test-and-coverage
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+          cache-dependency-path: '**/go.sum'
+
+      - name: Install Task
+        uses: arduino/setup-task@v1
+
+      - name: Build collector and server
+        run: task build:all
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            dist/collector
+            dist/main
+            dist/main.zip
+
+  smoke-clickhouse:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+          cache-dependency-path: '**/go.sum'
+
+      - name: Install Task
+        uses: arduino/setup-task@v1
+
+      - name: Install clickhouse-local
+        run: bash ./hack/install-clickhouse-local.sh
+
+      - name: Add local bin directory to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run ClickHouse smoke tests
+        run: task smoke:clickhouse
