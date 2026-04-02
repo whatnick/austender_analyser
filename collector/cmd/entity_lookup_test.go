@@ -2,50 +2,32 @@ package cmd
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
-
-	_ "modernc.org/sqlite"
 )
+
+func writeEntityLookupIndex(t *testing.T, dir string, files map[string]columnarFileMeta) {
+	t.Helper()
+	state := columnarIndexState{Version: columnarIndexVersion, Files: files}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, columnarIndexFileName), data, 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+}
 
 func TestFindAgenciesFromCatalog_NewSchema(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AUSTENDER_CACHE_DIR", dir)
 
-	db, err := sql.Open("sqlite", filepath.Join(dir, "catalog.sqlite"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-
-	_, err = db.Exec(`
-		CREATE TABLE parquet_files (
-			path TEXT PRIMARY KEY,
-			source TEXT NOT NULL,
-			fy TEXT NOT NULL,
-			agency_key TEXT NOT NULL,
-			agency_name TEXT NOT NULL,
-			company_key TEXT NOT NULL,
-			company_name TEXT NOT NULL,
-			row_count INTEGER NOT NULL,
-			created_at TEXT NOT NULL
-		);
-	`)
-	if err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-
-	// Insert two agencies, one with more rows.
-	_, err = db.Exec(`
-		INSERT INTO parquet_files(path, source, fy, agency_key, agency_name, company_key, company_name, row_count, created_at)
-		VALUES
-		('p1', 'federal', '2024-25', 'department_of_defence', 'Department of Defence', 'acme', 'Acme Pty Ltd', 100, 'now'),
-		('p2', 'federal', '2024-25', 'ato', 'Australian Taxation Office', 'acme', 'Acme Pty Ltd', 10, 'now');
-	`)
-	if err != nil {
-		t.Fatalf("insert: %v", err)
-	}
+	writeEntityLookupIndex(t, dir, map[string]columnarFileMeta{
+		"p1": {Path: "p1", Source: "federal", FinancialYear: "2024-25", AgencyKey: "department_of_defence", AgencyName: "Department of Defence", CompanyKey: "acme", CompanyName: "Acme Pty Ltd", RowCount: 100},
+		"p2": {Path: "p2", Source: "federal", FinancialYear: "2024-25", AgencyKey: "ato", AgencyName: "Australian Taxation Office", CompanyKey: "acme", CompanyName: "Acme Pty Ltd", RowCount: 10},
+	})
 
 	res, err := FindAgenciesFromCatalog(context.Background(), EntityLookupOptions{Source: "federal", Query: "defence", Limit: 10})
 	if err != nil {
@@ -66,36 +48,10 @@ func TestFindCompaniesFromCatalog_LegacySchemaFallback(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AUSTENDER_CACHE_DIR", dir)
 
-	db, err := sql.Open("sqlite", filepath.Join(dir, "catalog.sqlite"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-
-	// No *_name columns.
-	_, err = db.Exec(`
-		CREATE TABLE parquet_files (
-			path TEXT PRIMARY KEY,
-			source TEXT NOT NULL,
-			fy TEXT NOT NULL,
-			agency_key TEXT NOT NULL,
-			company_key TEXT NOT NULL,
-			row_count INTEGER NOT NULL,
-			created_at TEXT NOT NULL
-		);
-	`)
-	if err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	_, err = db.Exec(`
-		INSERT INTO parquet_files(path, source, fy, agency_key, company_key, row_count, created_at)
-		VALUES
-		('p1', 'vic', '2024-25', 'dept_health', 'kpmg', 50, 'now'),
-		('p2', 'vic', '2024-25', 'dept_health', 'acn_123', 10, 'now');
-	`)
-	if err != nil {
-		t.Fatalf("insert: %v", err)
-	}
+	writeEntityLookupIndex(t, dir, map[string]columnarFileMeta{
+		"p1": {Path: "p1", Source: "vic", FinancialYear: "2024-25", AgencyKey: "dept_health", CompanyKey: "kpmg", RowCount: 50},
+		"p2": {Path: "p2", Source: "vic", FinancialYear: "2024-25", AgencyKey: "dept_health", CompanyKey: "acn_123", RowCount: 10},
+	})
 
 	res, err := FindCompaniesFromCatalog(context.Background(), EntityLookupOptions{Source: "vic", Query: "kpmg", Limit: 10})
 	if err != nil {

@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// reindexLakeCmd rebuilds the parquet_files index by scanning existing lake files.
+// reindexLakeCmd rebuilds the ClickHouse-friendly lake index by scanning existing lake files.
 var reindexLakeCmd = &cobra.Command{
 	Use:   "reindex-lake",
 	Short: "Rebuild the lake index from parquet files on disk",

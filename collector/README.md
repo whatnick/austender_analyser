@@ -3,7 +3,7 @@
 Colly-powered CLI used for scraping Austender (federal) and state procurement portals, priming the Parquet lake, and exposing reusable helpers for the server.
 
 ## Capabilities
-- Streams OCDS releases into `~/.cache/austender/lake/fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>` with metadata tracked in `catalog.sqlite`.
+- Streams OCDS releases into `~/.cache/austender/lake/fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>` with metadata tracked in `clickhouse-index.json`.
 - Supports keyword (`--k`), company (`--c`), agency (`--d`), and jurisdiction (`--source federal|nsw|vic|sa|wa`) filters. Filters are optional when priming the cache.
 - Implements skip logic to avoid re-fetching month partitions already present in the lake.
 - Provides reindexing (`reindex-lake`) to reconcile the catalog with on-disk Parquet files.
@@ -13,11 +13,11 @@ Colly-powered CLI used for scraping Austender (federal) and state procurement po
 - `go run . --k KPMG` – aggregate spend using keyword match (defaults to 20-year lookback when start date omitted).
 - `go run . --c Accenture --source nsw` – constrain to company + jurisdiction.
 - `go run . cache --lookback-period 5` – hydrate the cache across five years before re-running `reindex-lake` automatically (used by `task collector:prime-lake`).
-- `go run . reindex-lake --cache-dir <path>` – rebuild `catalog.sqlite` when files change out of band.
+- `go run . reindex-lake --cache-dir <path>` – rebuild `clickhouse-index.json` when files change out of band.
 
 ## Environment Variables
 - `AUSTENDER_CACHE_DIR` – override cache root (defaults to `~/.cache/austender`).
-- `AUSTENDER_USE_CACHE=false` – bypass Parquet/SQLite cache and scrape directly (mostly for debugging).
+- `AUSTENDER_USE_CACHE=false` – bypass the Parquet/ClickHouse-style cache and scrape directly (mostly for debugging).
 - `AUSTENDER_LOOKBACK_PERIOD` – default year window when no start date is supplied (falls back to 20).
 
 ## Build & Test

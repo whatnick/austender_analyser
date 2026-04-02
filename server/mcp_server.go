@@ -96,7 +96,7 @@ type findEntitiesArgs struct {
 }
 
 type findEntitiesResult struct {
-	CatalogAvailable bool   `json:"catalogAvailable" jsonschema_description:"Whether a local catalog.sqlite was available for lookup."`
+	CatalogAvailable bool   `json:"catalogAvailable" jsonschema_description:"Whether a local clickhouse-index.json file was available for lookup."`
 	Evidence         string `json:"evidence,omitempty" jsonschema_description:"Short explanation of how candidates were selected."`
 	Candidates       []struct {
 		Source string `json:"source,omitempty" jsonschema_description:"Canonical source ID for the candidate."`

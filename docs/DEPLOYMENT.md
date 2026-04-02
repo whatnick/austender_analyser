@@ -34,7 +34,7 @@ task run:local           # or: bash hack/run-local.sh
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `AUSTENDER_MODE` | `local` | Set to `lambda` for Lambda entry point |
-| `AUSTENDER_CACHE_DIR` | `~/.cache/austender` | Parquet lake and SQLite catalog location |
+| `AUSTENDER_CACHE_DIR` | `~/.cache/austender` | Parquet lake and ClickHouse-friendly index location |
 | `AUSTENDER_USE_CACHE` | `true` | Enable the Parquet-backed disk cache |
 | `AUSTENDER_CACHE_TZ` | `Australia/Sydney` | Timezone for same-day in-memory cache bucketing |
 | `OPENAI_API_KEY` | — | Required for LLM endpoint (OpenAI backend) |
@@ -102,7 +102,7 @@ Stage 1 — golang:1.25-bookworm   → builds static server binary (CGO_ENABLED=
 Stage 2 — gcr.io/distroless/static-debian12 → runs the binary as non-root
 ```
 
-Both the server and collector use `modernc.org/sqlite` (pure Go), producing fully static binaries that run in distroless containers without libc.
+Both the server and collector use a Parquet lake plus `clickhouse-index.json`, so the local cache stays fully file-backed and continues to build into static binaries without an extra database runtime.
 
 ### Compose services
 

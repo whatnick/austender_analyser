@@ -2,14 +2,13 @@ package cmd
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
@@ -17,57 +16,33 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// dataLake tracks parquet files in a partitioned layout plus a SQLite index
+// dataLake tracks parquet files in a partitioned layout plus a lightweight
+// ClickHouse-friendly JSON index for fast discovery.
 // for fast discovery. Partitions are organized as source=<id>/fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>.
 type dataLake struct {
 	baseDir string
-	db      *sql.DB
+	index   *columnarIndex
 }
 
-func newDataLake(baseDir string, db *sql.DB) *dataLake {
-	return &dataLake{baseDir: baseDir, db: db}
+func newDataLake(baseDir string, index *columnarIndex) *dataLake {
+	return &dataLake{baseDir: baseDir, index: index}
 }
 
 func (l *dataLake) ensureSchema() error {
-	// Keep schema migrations resilient: older catalogs may have a parquet_files table
-	// without newer columns. Create the table if missing, then add columns, then add
-	// indexes that depend on those columns.
-	const createTable = `
-		CREATE TABLE IF NOT EXISTS parquet_files (
-			path TEXT PRIMARY KEY,
-			source TEXT NOT NULL,
-			fy TEXT NOT NULL,
-			agency_key TEXT NOT NULL,
-			agency_name TEXT NOT NULL,
-			company_key TEXT NOT NULL,
-			company_name TEXT NOT NULL,
-			row_count INTEGER NOT NULL,
-			created_at TEXT NOT NULL
-		);
-	`
-	if _, err := l.db.Exec(createTable); err != nil {
-		return err
+	if l == nil || l.index == nil {
+		return fmt.Errorf("columnar index not initialized")
 	}
-
-	// Best-effort migrations; ignore "duplicate column" errors.
-	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN source TEXT NOT NULL DEFAULT 'federal'")
-	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN agency_name TEXT NOT NULL DEFAULT ''")
-	_, _ = l.db.Exec("ALTER TABLE parquet_files ADD COLUMN company_name TEXT NOT NULL DEFAULT ''")
-
-	// Indexes (safe after columns exist).
-	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_keys ON parquet_files(source, fy, agency_key, company_key)")
-	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_agency_name ON parquet_files(source, agency_name)")
-	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_company_name ON parquet_files(source, company_name)")
-	_, _ = l.db.Exec("CREATE INDEX IF NOT EXISTS idx_parquet_files_source ON parquet_files(source)")
 	return nil
 }
 
 type lakeSink struct {
+	mu          sync.Mutex
 	w           *parquet.GenericWriter[parquetRow]
 	file        *os.File
 	lake        *dataLake
 	sourceKey   string
 	fy          string
+	month       string
 	agencyKey   string
 	agencyName  string
 	companyKey  string
@@ -78,6 +53,7 @@ type lakeSink struct {
 // lakeWriterPool lazily opens sinks per partition derived from match content.
 type lakeWriterPool struct {
 	lake  *dataLake
+	mu    sync.Mutex
 	sinks map[string]*lakeSink
 }
 
@@ -104,16 +80,19 @@ func (l *dataLake) newSink(source string, ts time.Time, agency, company string) 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("part-%d.parquet", time.Now().Unix()))
+	path := filepath.Join(dir, fmt.Sprintf("part-%d.parquet", time.Now().UnixNano()))
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
 	}
 	w := parquet.NewGenericWriter[parquetRow](f, parquet.Compression(&snappy.Codec{}))
-	return &lakeSink{w: w, file: f, lake: l, sourceKey: sourceKey, fy: fy, agencyKey: ag, agencyName: strings.TrimSpace(agency), companyKey: co, companyName: strings.TrimSpace(company)}, nil
+	return &lakeSink{w: w, file: f, lake: l, sourceKey: sourceKey, fy: fy, month: month, agencyKey: ag, agencyName: strings.TrimSpace(agency), companyKey: co, companyName: strings.TrimSpace(company)}, nil
 }
 
 func (s *lakeSink) write(ms MatchSummary) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	row := parquetRow{
 		Partition:     partitionKeyLake(ms.ReleaseDate, ms.Source, ms.Agency, ms.Supplier),
 		Source:        normalizeSourceID(ms.Source),
@@ -134,15 +113,30 @@ func (s *lakeSink) write(ms MatchSummary) {
 	s.rows++
 }
 
-func (s *lakeSink) close() {
+func (s *lakeSink) close() *columnarFileMeta {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.w != nil {
 		_ = s.w.Close()
 	}
 	if s.file != nil {
 		_ = s.file.Close()
 	}
-	if s.lake != nil && s.rows > 0 {
-		_, _ = s.lake.db.Exec("INSERT OR REPLACE INTO parquet_files(path, source, fy, agency_key, agency_name, company_key, company_name, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", s.file.Name(), s.sourceKey, s.fy, s.agencyKey, s.agencyName, s.companyKey, s.companyName, s.rows, time.Now().UTC().Format(time.RFC3339))
+	if s.lake == nil || s.file == nil || s.rows == 0 {
+		return nil
+	}
+	return &columnarFileMeta{
+		Path:          s.file.Name(),
+		Source:        s.sourceKey,
+		FinancialYear: s.fy,
+		Month:         s.month,
+		AgencyKey:     s.agencyKey,
+		AgencyName:    s.agencyName,
+		CompanyKey:    s.companyKey,
+		CompanyName:   s.companyName,
+		RowCount:      s.rows,
+		CreatedAt:     time.Now().UTC(),
 	}
 }
 
@@ -152,35 +146,57 @@ func (p *lakeWriterPool) write(ms MatchSummary) error {
 		return fmt.Errorf("lake writer pool not initialized")
 	}
 	partition := partitionKeyLake(ms.ReleaseDate, ms.Source, ms.Agency, ms.Supplier)
+	p.mu.Lock()
 	sink, ok := p.sinks[partition]
 	if !ok {
 		var err error
 		sink, err = p.lake.newSink(ms.Source, ms.ReleaseDate, ms.Agency, ms.Supplier)
 		if err != nil {
+			p.mu.Unlock()
 			return err
 		}
 		p.sinks[partition] = sink
 	}
+	p.mu.Unlock()
 	sink.write(ms)
 	return nil
 }
 
 func (p *lakeWriterPool) closeAll() {
+	p.mu.Lock()
+	sinks := make([]*lakeSink, 0, len(p.sinks))
 	for _, s := range p.sinks {
-		s.close()
+		sinks = append(sinks, s)
+	}
+	p.mu.Unlock()
+
+	metas := make([]columnarFileMeta, 0, len(sinks))
+	for _, s := range sinks {
+		if meta := s.close(); meta != nil {
+			metas = append(metas, *meta)
+		}
+	}
+	if len(metas) > 0 && p.lake != nil && p.lake.index != nil {
+		_ = p.lake.index.upsertFiles(metas)
 	}
 }
 
-// rebuildIndex scans the lake directory and rebuilds the parquet_files index.
+// rebuildIndex scans the lake directory and rebuilds the columnar file index.
 func (l *dataLake) rebuildIndex(ctx context.Context) error {
 	if err := l.ensureSchema(); err != nil {
 		return err
 	}
-	_, _ = l.db.ExecContext(ctx, "DELETE FROM parquet_files")
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	root := filepath.Join(l.baseDir, "lake")
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	var files []columnarFileMeta
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".parquet") {
 			return nil
@@ -190,55 +206,39 @@ func (l *dataLake) rebuildIndex(ctx context.Context) error {
 		if countErr != nil {
 			return nil
 		}
-		_, _ = l.db.ExecContext(ctx, "INSERT OR REPLACE INTO parquet_files(path, source, fy, agency_key, agency_name, company_key, company_name, row_count, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", path, src, fy, ag, ag, co, co, rowCount, time.Now().UTC().Format(time.RFC3339))
+		files = append(files, columnarFileMeta{
+			Path:          path,
+			Source:        src,
+			FinancialYear: fy,
+			Month:         monthLabelFromPath(path),
+			AgencyKey:     ag,
+			AgencyName:    ag,
+			CompanyKey:    co,
+			CompanyName:   co,
+			RowCount:      rowCount,
+			CreatedAt:     time.Now().UTC(),
+		})
 		return nil
-	})
+	}); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return l.index.replaceFiles(nil)
+		}
+		return err
+	}
+	if len(files) == 0 {
+		return l.index.replaceFiles(nil)
+	}
+	if err := l.index.replaceFiles(files); err != nil {
+		return err
+	}
+	return nil
 }
 
 // queryTotals returns sum of matching rows using the lake index to pick files.
 func (l *dataLake) queryTotals(ctx context.Context, filters SearchRequest) (decimalSum decimalSumResult, matched bool, err error) {
-	// Collect candidate files via index filtering.
-	var args []any
-	var clauses []string
-	sourceKey := sanitizePartitionComponent(normalizeSourceID(filters.Source))
-	clauses = append(clauses, "source = ?")
-	args = append(args, sourceKey)
-	if strings.TrimSpace(filters.Agency) != "" {
-		agencyKey := sanitizePartitionComponent(filters.Agency)
-		clauses = append(clauses, "agency_key LIKE ?")
-		args = append(args, "%"+agencyKey+"%")
-	}
-	if strings.TrimSpace(filters.Company) != "" {
-		companyKey := sanitizePartitionComponent(filters.Company)
-		clauses = append(clauses, "company_key LIKE ?")
-		args = append(args, "%"+companyKey+"%")
-	}
-
-	// Lookback by FY if specified; stored FY values are trimmed (e.g., 2024-25), so strip any prefix.
-	if filters.LookbackPeriod > 0 {
-		minFy := strings.TrimPrefix(financialYearLabel(time.Now().AddDate(-filters.LookbackPeriod, 0, 0)), "fy=")
-		clauses = append(clauses, "fy >= ?")
-		args = append(args, minFy)
-	}
-
-	where := ""
-	if len(clauses) > 0 {
-		where = "WHERE " + strings.Join(clauses, " AND ")
-	}
-	query := fmt.Sprintf("SELECT path FROM parquet_files %s", where)
-	rows, err := l.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return decimalSumResult{}, false, err
-	}
-	defer rows.Close()
-
 	total := decimalSumResult{}
-	for rows.Next() {
-		var path string
-		if scanErr := rows.Scan(&path); scanErr != nil {
-			return decimalSumResult{}, false, scanErr
-		}
-		inc, hit, scanErr := sumParquetFile(path, filters)
+	for _, meta := range l.index.filesMatching(filters) {
+		inc, hit, scanErr := sumParquetFile(meta.Path, filters)
 		if scanErr != nil {
 			continue
 		}
@@ -325,14 +325,12 @@ type ContractSearchResult struct {
 // QueryContracts returns individual contract records from the Parquet lake.
 func QueryContracts(ctx context.Context, filters SearchRequest, limit int) (ContractSearchResult, error) {
 	cacheDir := defaultCacheDir()
-	dbPath := filepath.Join(cacheDir, "catalog.sqlite")
-	db, err := sql.Open("sqlite", dbPath)
+	index, err := newColumnarIndex(cacheDir)
 	if err != nil {
 		return ContractSearchResult{}, err
 	}
-	defer db.Close()
 
-	lake := newDataLake(filepath.Join(cacheDir), db)
+	lake := newDataLake(filepath.Join(cacheDir), index)
 	if schemaErr := lake.ensureSchema(); schemaErr != nil {
 		return ContractSearchResult{}, schemaErr
 	}
@@ -349,54 +347,15 @@ func (l *dataLake) queryContracts(ctx context.Context, filters SearchRequest, li
 		limit = 1000
 	}
 
-	// Build SQL WHERE for index lookup (same as queryTotals).
-	var args []any
-	var clauses []string
-	if src := strings.TrimSpace(filters.Source); src != "" {
-		sourceKey := sanitizePartitionComponent(normalizeSourceID(src))
-		clauses = append(clauses, "source = ?")
-		args = append(args, sourceKey)
-	}
-	if strings.TrimSpace(filters.Agency) != "" {
-		agencyKey := sanitizePartitionComponent(filters.Agency)
-		clauses = append(clauses, "agency_key LIKE ?")
-		args = append(args, "%"+agencyKey+"%")
-	}
-	if strings.TrimSpace(filters.Company) != "" {
-		companyKey := sanitizePartitionComponent(filters.Company)
-		clauses = append(clauses, "company_key LIKE ?")
-		args = append(args, "%"+companyKey+"%")
-	}
-	if filters.LookbackPeriod > 0 {
-		minFy := strings.TrimPrefix(financialYearLabel(time.Now().AddDate(-filters.LookbackPeriod, 0, 0)), "fy=")
-		clauses = append(clauses, "fy >= ?")
-		args = append(args, minFy)
-	}
-
-	where := ""
-	if len(clauses) > 0 {
-		where = "WHERE " + strings.Join(clauses, " AND ")
-	}
-	query := fmt.Sprintf("SELECT path FROM parquet_files %s", where)
-	rows, err := l.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return ContractSearchResult{}, err
-	}
-	defer rows.Close()
-
 	var result ContractSearchResult
 	totalSpend := decimal.Zero
 	seen := make(map[string]struct{})
 
-	for rows.Next() {
+	for _, meta := range l.index.filesMatching(filters) {
 		if len(result.Contracts) >= limit {
 			break
 		}
-		var path string
-		if scanErr := rows.Scan(&path); scanErr != nil {
-			continue
-		}
-		records, spend, scanErr := readParquetContracts(path, filters, limit-len(result.Contracts), seen)
+		records, spend, scanErr := readParquetContracts(meta.Path, filters, limit-len(result.Contracts), seen)
 		if scanErr != nil {
 			continue
 		}
@@ -486,23 +445,10 @@ func readParquetContracts(path string, filters SearchRequest, limit int, seen ma
 
 // hasMonthPartition returns true if a month partition already contains parquet files.
 func (l *dataLake) hasMonthPartition(source string, ts time.Time) bool {
-	sourceKey := sanitizePartitionComponent(normalizeSourceID(source))
-	root := filepath.Join(l.baseDir, "lake", fmt.Sprintf("source=%s", sourceKey), financialYearLabel(ts), monthLabel(ts))
-	found := false
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if found {
-			return fs.SkipAll
-		}
-		if !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".parquet") {
-			found = true
-			return fs.SkipAll
-		}
-		return nil
-	})
-	return found
+	if l == nil || l.index == nil {
+		return false
+	}
+	return l.index.hasMonthPartition(source, ts)
 }
 
 // shouldFetchWindow reports whether a date window should be fetched based on existing partitions.
@@ -575,4 +521,14 @@ func parseLakePartition(path string) (string, string, string, string) {
 		src = sanitizePartitionComponent(defaultSourceID)
 	}
 	return src, fy, ag, co
+}
+
+func monthLabelFromPath(path string) string {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for _, p := range parts {
+		if strings.HasPrefix(p, "month=") {
+			return p
+		}
+	}
+	return ""
 }

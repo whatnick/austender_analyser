@@ -6,14 +6,14 @@ Serverless-first Go stack that scrapes Australian government contract data, pers
 ![KPMG Tenders](docs/KPMG_result_2023_01_22.png)
 
 ## Highlights
-- Collector CLI streams OCDS releases into a partitioned Parquet lake with a SQLite catalog under `~/.cache/austender` (override with `AUSTENDER_CACHE_DIR`).
+- Collector CLI streams OCDS releases into a partitioned Parquet lake with a ClickHouse-friendly JSON index under `~/.cache/austender` (override with `AUSTENDER_CACHE_DIR`).
 - Dedicated adapters for federal, NSW, VIC, SA, and WA portals selectable via `--source`; each run skips month partitions already present in the lake.
 - Server shares collector helpers, adds a same-day in-memory cache, and exposes REST, MCP, and LLM endpoints.
 - Chat-style HTMX frontend targets `/api/llm`, auto-detects available LLM backends (OpenAI or Ollama), and can attach MCP configs on demand.
 - Infrastructure-as-code stack (Go CDK) packages the API for Lambda+API Gateway and fronts the static site with S3+CloudFront.
 
 ## Roadmap Snapshot
-- [x] Partitioned Parquet + SQLite lake with reindex command
+- [x] Partitioned Parquet + ClickHouse-friendly index with reindex command
 - [x] Dual-mode server (local HTTP + AWS Lambda)
 - [x] MCP-aware `/api/llm` agent that can call collector tools (jurisdiction detection, entity lookup, contract aggregation)
 - [x] Coverage harness via `task test:all` (collector, server, infra)

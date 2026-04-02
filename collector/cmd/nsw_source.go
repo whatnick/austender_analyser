@@ -397,6 +397,7 @@ window.chrome = window.chrome || { runtime: {} };
 		}()
 	}
 
+enqueueLoop:
 	for _, win := range windows {
 		if ctx.Err() != nil {
 			break
@@ -410,7 +411,7 @@ window.chrome = window.chrome || { runtime: {} };
 		}
 		select {
 		case <-ctx.Done():
-			break
+			break enqueueLoop
 		case jobs <- win:
 		}
 	}

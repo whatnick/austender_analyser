@@ -2,11 +2,11 @@ package cmd
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -39,10 +39,10 @@ func FindCompaniesFromCatalog(ctx context.Context, opts EntityLookupOptions) (En
 
 func findEntitiesFromCatalog(ctx context.Context, kind string, opts EntityLookupOptions) (EntityLookupResult, error) {
 	cacheDir := defaultCacheDir()
-	dbPath := filepath.Join(cacheDir, "catalog.sqlite")
-	if _, err := os.Stat(dbPath); err != nil {
+	indexPath := columnarIndexPath(cacheDir)
+	if _, err := os.Stat(indexPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return EntityLookupResult{CatalogAvailable: false, Evidence: fmt.Sprintf("catalog.sqlite not found in %s", cacheDir), Candidates: []EntityCandidate{}}, nil
+			return EntityLookupResult{CatalogAvailable: false, Evidence: fmt.Sprintf("%s not found in %s", filepath.Base(indexPath), cacheDir), Candidates: []EntityCandidate{}}, nil
 		}
 		return EntityLookupResult{}, err
 	}
@@ -55,103 +55,99 @@ func findEntitiesFromCatalog(ctx context.Context, kind string, opts EntityLookup
 		limit = 50
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	index, err := newColumnarIndex(cacheDir)
 	if err != nil {
 		return EntityLookupResult{}, err
 	}
-	defer db.Close()
 
-	res, err := queryEntities(ctx, db, kind, opts.Source, opts.Query, limit, true)
-	if err == nil {
-		res.CatalogAvailable = true
-		return res, nil
-	}
-
-	// Legacy fallback: older catalogs may not have the *_name columns.
-	fallback, fbErr := queryEntities(ctx, db, kind, opts.Source, opts.Query, limit, false)
-	if fbErr == nil {
-		fallback.CatalogAvailable = true
-		fallback.Evidence = strings.TrimSpace(strings.Join([]string{fallback.Evidence, "legacy schema fallback"}, "; "))
-		return fallback, nil
-	}
-	return EntityLookupResult{}, err
+	res := queryEntities(kind, index.allFiles(), opts.Source, opts.Query, limit)
+	res.CatalogAvailable = true
+	return res, nil
 }
 
-func queryEntities(ctx context.Context, db *sql.DB, kind, source, q string, limit int, withNames bool) (EntityLookupResult, error) {
+func queryEntities(kind string, files []columnarFileMeta, source, q string, limit int) EntityLookupResult {
 	var keyCol, nameCol string
 	switch kind {
 	case "agency":
-		keyCol = "agency_key"
-		nameCol = "agency_name"
+		keyCol = "agency"
+		nameCol = "agencyName"
 	case "company":
-		keyCol = "company_key"
-		nameCol = "company_name"
+		keyCol = "company"
+		nameCol = "companyName"
 	default:
-		return EntityLookupResult{}, fmt.Errorf("unknown entity kind: %s", kind)
+		return EntityLookupResult{Candidates: []EntityCandidate{}, Evidence: fmt.Sprintf("unknown entity kind: %s", kind)}
 	}
 
-	var nameExpr string
-	if withNames {
-		nameExpr = fmt.Sprintf("COALESCE(NULLIF(%s, ''), %s)", nameCol, keyCol)
-	} else {
-		nameExpr = keyCol
+	type aggregate struct {
+		source string
+		name   string
+		key    string
+		rows   int64
 	}
+	agg := make(map[string]*aggregate)
 
-	var args []any
-	var clauses []string
-
-	// Optional source filtering.
-	if strings.TrimSpace(source) != "" {
-		sourceKey := sanitizePartitionComponent(normalizeSourceID(source))
-		clauses = append(clauses, "source = ?")
-		args = append(args, sourceKey)
-	}
-
-	// Optional query filtering.
 	query := strings.ToLower(strings.TrimSpace(q))
-	if query != "" {
-		namePattern := "%" + query + "%"
-		keyPattern := "%" + sanitizePartitionComponent(query) + "%"
-		clauses = append(clauses, fmt.Sprintf("(LOWER(%s) LIKE ? OR %s LIKE ?)", nameExpr, keyCol))
-		args = append(args, namePattern, keyPattern)
+	sourceKey := ""
+	if strings.TrimSpace(source) != "" {
+		sourceKey = normalizeSourceID(source)
 	}
-
-	where := ""
-	if len(clauses) > 0 {
-		where = "WHERE " + strings.Join(clauses, " AND ")
-	}
-
-	selectCols := fmt.Sprintf("source, %s as name, %s as entity_key, SUM(row_count) as rows", nameExpr, keyCol)
-	groupBy := "GROUP BY source, name, entity_key"
-	orderBy := "ORDER BY rows DESC"
-	querySQL := fmt.Sprintf("SELECT %s FROM parquet_files %s %s %s LIMIT ?", selectCols, where, groupBy, orderBy)
-	args = append(args, limit)
-
-	rows, err := db.QueryContext(ctx, querySQL, args...)
-	if err != nil {
-		return EntityLookupResult{}, err
-	}
-	defer rows.Close()
 
 	out := EntityLookupResult{Candidates: []EntityCandidate{}}
 	if query != "" {
 		out.Evidence = fmt.Sprintf("substring match: %q", query)
 	} else {
-		out.Evidence = "top entities from catalog"
+		out.Evidence = "top entities from columnar index"
 	}
 
-	for rows.Next() {
-		var src, name, key string
-		var n int64
-		if scanErr := rows.Scan(&src, &name, &key, &n); scanErr != nil {
-			return EntityLookupResult{}, scanErr
+	for _, meta := range files {
+		if sourceKey != "" && normalizeSourceID(meta.Source) != sourceKey {
+			continue
 		}
-		name = strings.TrimSpace(name)
+
+		var key, name string
+		switch keyCol {
+		case "agency":
+			key = meta.AgencyKey
+			name = strings.TrimSpace(meta.AgencyName)
+		case "company":
+			key = meta.CompanyKey
+			name = strings.TrimSpace(meta.CompanyName)
+		}
 		if name == "" {
 			name = key
 		}
-		out.Candidates = append(out.Candidates, EntityCandidate{Source: src, Name: name, Key: key, Rows: n})
+		if query != "" {
+			if !strings.Contains(strings.ToLower(name), query) && !strings.Contains(strings.ToLower(key), sanitizePartitionComponent(query)) {
+				continue
+			}
+		}
+		aggKey := normalizeSourceID(meta.Source) + "|" + key + "|" + name + "|" + nameCol
+		item := agg[aggKey]
+		if item == nil {
+			item = &aggregate{source: normalizeSourceID(meta.Source), name: name, key: key}
+			agg[aggKey] = item
+		}
+		item.rows += meta.RowCount
 	}
 
-	return out, nil
+	ranked := make([]aggregate, 0, len(agg))
+	for _, item := range agg {
+		ranked = append(ranked, *item)
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].rows == ranked[j].rows {
+			if ranked[i].name == ranked[j].name {
+				return ranked[i].source < ranked[j].source
+			}
+			return ranked[i].name < ranked[j].name
+		}
+		return ranked[i].rows > ranked[j].rows
+	})
+	for _, item := range ranked {
+		if len(out.Candidates) >= limit {
+			break
+		}
+		out.Candidates = append(out.Candidates, EntityCandidate{Source: item.source, Name: item.name, Key: item.key, Rows: item.rows})
+	}
+	return out
 }

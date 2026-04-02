@@ -2,16 +2,12 @@ package cmd
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite"
 
 	"github.com/leekchan/accounting"
 	"github.com/shopspring/decimal"
@@ -24,12 +20,12 @@ const indexRebuildInterval = 24 * time.Hour
 var runSearchFunc = RunSearch
 
 // cacheCmd wires an incremental ETL that writes OCDS matches into parquet files
-// and tracks checkpoints in a lightweight SQLite catalog. Subsequent runs resume
+// and tracks checkpoints in a lightweight columnar index. Subsequent runs resume
 // from the last completed window while full scrapes remain available via the
 // existing root command.
 var cacheCmd = &cobra.Command{
 	Use:   "cache",
-	Short: "Incremental ETL to local parquet cache backed by SQLite checkpoints",
+	Short: "Incremental ETL to local parquet cache backed by a ClickHouse-friendly index",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		keyword, _ := cmd.Flags().GetString("keyword")
 		company, _ := cmd.Flags().GetString("company")
@@ -269,7 +265,7 @@ func init() {
 	cacheCmd.Flags().String("source", defaultSourceID, "Data source identifier (e.g., federal)")
 	cacheCmd.Flags().String("date-type", defaultDateType, "OCDS date field: contractPublished, contractStart, contractEnd, contractLastModified")
 	cacheCmd.Flags().Int("lookback-period", defaultLookbackPeriod, "Default window when start not specified")
-	cacheCmd.Flags().String("cache-dir", defaultCacheDir(), "Directory for parquet files and sqlite catalog")
+	cacheCmd.Flags().String("cache-dir", defaultCacheDir(), "Directory for parquet files and ClickHouse-friendly index")
 	cacheCmd.Flags().Bool("no-cache", false, "Bypass cache and run a full scrape (does not write parquet)")
 	cacheCmd.Flags().String("start-date", "", "Optional start date (YYYY-MM-DD or RFC3339)")
 	cacheCmd.Flags().String("end-date", "", "Optional end date (YYYY-MM-DD or RFC3339)")
@@ -277,7 +273,7 @@ func init() {
 
 type cacheManager struct {
 	baseDir string
-	db      *sql.DB
+	index   *columnarIndex
 	lake    *dataLake
 }
 
@@ -325,44 +321,31 @@ func newCacheManager(baseDir string) (*cacheManager, error) {
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return nil, err
 	}
-	dbPath := filepath.Join(baseDir, "catalog.sqlite")
-	db, err := sql.Open("sqlite", dbPath)
+	index, err := newColumnarIndex(baseDir)
 	if err != nil {
 		return nil, err
 	}
-	mgr := &cacheManager{baseDir: baseDir, db: db}
-	mgr.lake = newDataLake(baseDir, db)
+	mgr := &cacheManager{baseDir: baseDir, index: index}
+	mgr.lake = newDataLake(baseDir, index)
 	if err := mgr.ensureSchema(); err != nil {
-		_ = db.Close()
 		return nil, err
+	}
+	if !index.exists() {
+		lakeDir := filepath.Join(baseDir, "lake")
+		if _, err := os.Stat(lakeDir); err == nil {
+			if err := mgr.lake.rebuildIndex(context.Background()); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return mgr, nil
 }
 
 func (m *cacheManager) ensureSchema() error {
-	const schema = `
-	CREATE TABLE IF NOT EXISTS checkpoints (
-		key TEXT PRIMARY KEY,
-		last_run TEXT NOT NULL
-	);
-	CREATE TABLE IF NOT EXISTS partitions (
-		partition_key TEXT NOT NULL,
-		path TEXT PRIMARY KEY,
-		created_at TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_partitions_key ON partitions(partition_key);
-	`
-	if _, err := m.db.Exec(schema); err != nil {
-		return err
-	}
 	return m.lake.ensureSchema()
 }
 
-func (m *cacheManager) close() {
-	if m.db != nil {
-		_ = m.db.Close()
-	}
-}
+func (m *cacheManager) close() {}
 
 func cacheKey(keyword, company, agency, dateType, source string) string {
 	normalizedSource := normalizeSourceID(source)
@@ -370,24 +353,11 @@ func cacheKey(keyword, company, agency, dateType, source string) string {
 }
 
 func (m *cacheManager) loadCheckpoint(key string) (time.Time, error) {
-	row := m.db.QueryRow("SELECT last_run FROM checkpoints WHERE key = ?", key)
-	var ts string
-	if err := row.Scan(&ts); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return time.Time{}, nil
-		}
-		return time.Time{}, err
-	}
-	t, err := time.Parse(time.RFC3339, ts)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return t, nil
+	return m.index.loadCheckpoint(key)
 }
 
 func (m *cacheManager) saveCheckpoint(key string, t time.Time) error {
-	_, err := m.db.Exec("INSERT INTO checkpoints(key, last_run) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET last_run = excluded.last_run", key, t.UTC().Format(time.RFC3339))
-	return err
+	return m.index.saveCheckpoint(key, t)
 }
 
 func partitionKey(ts time.Time, agency string) string {

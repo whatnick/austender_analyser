@@ -8,7 +8,7 @@
 - Keep the pipeline auditable end-to-end by publishing OCDS release packages and MCP tool schemas alongside every deployment artifact.
 
 ## 2. Architecture Snapshot
-- **collector/** – Colly-based scraper + Cobra CLI. Normalize every scrape into OCDS release + record structures and expose reusable helpers (`github.com/whatnick/austender_analyser/collector`) for other modules. Supports multi-jurisdiction scraping via dedicated sources for federal, NSW, VIC, SA, and WA (selectable with `--source`). Writes all valued releases into a partitioned Parquet lake (fy/month/agency/company) with a SQLite catalog and skips month windows already present.
+- **collector/** – Colly-based scraper + Cobra CLI. Normalize every scrape into OCDS release + record structures and expose reusable helpers (`github.com/whatnick/austender_analyser/collector`) for other modules. Supports multi-jurisdiction scraping via dedicated sources for federal, NSW, VIC, SA, and WA (selectable with `--source`). Writes all valued releases into a partitioned Parquet lake (fy/month/agency/company) with a ClickHouse-friendly JSON index and skips month windows already present.
 - **server/** – HTTP handlers + AWS Lambda proxy integration (uses `aws-lambda-go`). Controlled by `AUSTENDER_MODE` env: `local` for `:8080` server, `lambda` for API Gateway. Hosts the MCP-compatible tool surface defined in `server/mcp_server.go`.
 - **infra/** – AWS CDK (Go) stack building Lambda, API Gateway, S3 (static site), CloudFront, and minimal state buckets to ship OCDS JSON artifacts. Default region/account pulled from `aws sts get-caller-identity` and `ap-southeast-1`.
 - **frontend/** – Static HTMX chat page that calls `/api/llm`; includes a toggle to attach MCP config per request. `config.local.js` overrides API base and default MCP config for local runs.
@@ -64,7 +64,7 @@
 - Coordinate schema or API shape changes with both frontend and infra stakeholders before merging.
 
 ## 8. Roadmap & Performance Priorities
-- **Columnar acceleration** – Evaluate Duck Lake, DuckDB/MotherDuck, ClickHouse, Apache Arrow Flight SQL, and BigQuery Omni as downstream sinks fed by OCDS releases. Favor engines that support fast group-by on contract value and can be embedded in Lambda or WASM for client-side pivots.
+- **Columnar acceleration** – Default the local analytics path to ClickHouse over the published Parquet lake, while still evaluating Apache Arrow Flight SQL and BigQuery Omni as downstream sinks fed by OCDS releases. Favor engines that support fast group-by on contract value and can be embedded in Lambda or WASM for client-side pivots.
 - **Incremental snapshots** – Emit parquet/arrow snapshots alongside JSON to avoid reprocessing entire OCDS archives. Include `releases/updates` partitioning keyed by financial year + agency.
 - **Client-forward MCP agents** – Ship lightweight MCP manifests that let end users host the aggregator locally (e.g., in VS Code or browsers with WASM collectors). The central API should only broker credentials and cache scraped HTML to keep server costs negligible.
 - **Scalable deployment method** – Default deployment path: collector runs in CI (GitHub Actions or lightweight container runner), pushes OCDS+columnar artifacts to S3, and CDN + MCP endpoints serve static + tool metadata. Consumers opt into richer analytics by pointing Duck Lake/ClickHouse instances at the published parquet/arrow manifests. Document required IAM least-privilege roles for this pattern.

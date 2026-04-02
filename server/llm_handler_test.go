@@ -3,51 +3,45 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/tmc/langchaingo/llms"
 	collector "github.com/whatnick/austender_analyser/collector/cmd"
-	_ "modernc.org/sqlite"
 )
 
 func writeTestCatalogForLLM(t *testing.T, cacheDir string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(cacheDir, "catalog.sqlite"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
+	type testIndexFile struct {
+		Path          string `json:"path"`
+		Source        string `json:"source"`
+		FinancialYear string `json:"financialYear"`
+		AgencyKey     string `json:"agencyKey"`
+		AgencyName    string `json:"agencyName,omitempty"`
+		CompanyKey    string `json:"companyKey"`
+		CompanyName   string `json:"companyName,omitempty"`
+		RowCount      int64  `json:"rowCount"`
 	}
-	defer db.Close()
-
-	_, err = db.Exec(`
-		CREATE TABLE parquet_files (
-			path TEXT PRIMARY KEY,
-			source TEXT NOT NULL,
-			fy TEXT NOT NULL,
-			agency_key TEXT NOT NULL,
-			agency_name TEXT NOT NULL,
-			company_key TEXT NOT NULL,
-			company_name TEXT NOT NULL,
-			row_count INTEGER NOT NULL,
-			created_at TEXT NOT NULL
-		);
-	`)
-	if err != nil {
-		t.Fatalf("create table: %v", err)
+	type testIndexState struct {
+		Version int                      `json:"version"`
+		Files   map[string]testIndexFile `json:"files"`
 	}
-
-	_, err = db.Exec(`
-		INSERT INTO parquet_files(path, source, fy, agency_key, agency_name, company_key, company_name, row_count, created_at)
-		VALUES
-		('p1', 'federal', '2024-25', 'department_of_defence', 'Department of Defence', 'kpmg', 'KPMG', 100, 'now'),
-		('p2', 'federal', '2024-25', 'ato', 'Australian Taxation Office', 'acme', 'Acme Pty Ltd', 10, 'now');
-	`)
+	data, err := json.MarshalIndent(testIndexState{
+		Version: 1,
+		Files: map[string]testIndexFile{
+			"p1": {Path: "p1", Source: "federal", FinancialYear: "2024-25", AgencyKey: "department_of_defence", AgencyName: "Department of Defence", CompanyKey: "kpmg", CompanyName: "KPMG", RowCount: 100},
+			"p2": {Path: "p2", Source: "federal", FinancialYear: "2024-25", AgencyKey: "ato", AgencyName: "Australian Taxation Office", CompanyKey: "acme", CompanyName: "Acme Pty Ltd", RowCount: 10},
+		},
+	}, "", "  ")
 	if err != nil {
-		t.Fatalf("insert: %v", err)
+		t.Fatalf("marshal index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "clickhouse-index.json"), data, 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
 	}
 }
 

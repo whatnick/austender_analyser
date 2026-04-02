@@ -90,6 +90,7 @@ func runSaWithBrowser(ctx context.Context, req SearchRequest, windows []dateWind
 	}
 
 	// Feed month windows.
+enqueueLoop:
 	for _, win := range windows {
 		if ctx.Err() != nil {
 			break
@@ -103,7 +104,7 @@ func runSaWithBrowser(ctx context.Context, req SearchRequest, windows []dateWind
 		}
 		select {
 		case <-ctx.Done():
-			break
+			break enqueueLoop
 		case jobs <- win:
 			// Progress is reported by workers when the job finishes.
 		}

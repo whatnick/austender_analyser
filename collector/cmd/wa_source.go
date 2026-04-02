@@ -107,6 +107,13 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 
 		awardDateStr := strings.TrimSpace(e.ChildText("td:nth-child(5)"))
 		valueStr := strings.TrimSpace(e.ChildText("td:nth-child(7)"))
+		var awardDate time.Time
+		for _, fmtStr := range []string{"2006-01-02", "02/01/2006"} {
+			if t, err := time.Parse(fmtStr, awardDateStr); err == nil {
+				awardDate = t
+				break
+			}
+		}
 
 		supplier := strings.TrimSpace(e.Request.Ctx.Get("supplier"))
 		if supplier == "" {
@@ -136,21 +143,23 @@ func (w waSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 
 		val, err := parseWaMoney(valueStr)
 		if err == nil {
+			if req.OnAnyMatch != nil {
+				req.OnAnyMatch(MatchSummary{
+					ContractID:  ref,
+					Source:      waSourceID,
+					Supplier:    supplier,
+					Agency:      agency,
+					Title:       title,
+					Amount:      val,
+					ReleaseDate: awardDate,
+				})
+			}
 			totalsMu.Lock()
 			total = total.Add(val)
 			totalsMu.Unlock()
 		}
 
 		if req.OnMatch != nil {
-			// Try multiple date formats
-			var awardDate time.Time
-			for _, fmtStr := range []string{"2006-01-02", "02/01/2006"} {
-				if t, err := time.Parse(fmtStr, awardDateStr); err == nil {
-					awardDate = t
-					break
-				}
-			}
-
 			req.OnMatch(MatchSummary{
 				ContractID:  ref,
 				Source:      waSourceID,

@@ -253,9 +253,7 @@ func normalizeOllamaURL(raw string) string {
 	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
 		return strings.TrimRight(raw, "/")
 	}
-	if strings.HasPrefix(raw, "//") {
-		raw = raw[2:]
-	}
+	raw = strings.TrimPrefix(raw, "//")
 	host := raw
 	if !strings.Contains(host, ":") {
 		host = host + ":11434"

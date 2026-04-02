@@ -6,7 +6,7 @@ Welcome to the Austender Analyser mono-repo. This guide summarises how the piece
 - Answers “how much has the government spent with <keyword>?” by scraping [Austender](https://www.tenders.gov.au) and aligned state portals (NSW, VIC, SA, WA).
 - Provides a Go CLI (`collector`) for scraping and cache priming, a Go HTTP/Lambda server (`server`) for REST + MCP + LLM access, and Go CDK infrastructure (`infra`) to deploy the stack.
 - Ships a minimal HTMX frontend (`frontend`) that exercises `/api/llm`, auto-detects LLM backends, and can attach MCP configurations.
-- Maintains a Parquet lake + SQLite catalog under `~/.cache/austender`, partitioned by FY/month/agency/company. Runs skip month partitions already present and keep keyword/company/agency filters optional for broad warming.
+- Maintains a Parquet lake + ClickHouse-friendly JSON index under `~/.cache/austender`, partitioned by FY/month/agency/company. Runs skip month partitions already present and keep keyword/company/agency filters optional for broad warming.
 - Layers a same-day in-memory cache inside the server on top of the Parquet lake, so repeated questions avoid redundant scrapes.
 
 ## Architecture Snapshot

@@ -10,16 +10,17 @@ import (
 
 func TestDefaultAnalyticsSQL(t *testing.T) {
 	sql := defaultAnalyticsSQL("/tmp/cache", 25)
-	require.Contains(t, sql, "parquet_scan")
+	require.Contains(t, sql, "file('")
 	require.Contains(t, sql, "limit 25")
 }
 
-func TestBuildDucklakeManifest(t *testing.T) {
-	raw, err := BuildDucklakeManifest("/var/cache")
+func TestBuildClickHouseManifest(t *testing.T) {
+	raw, err := BuildClickHouseManifest("/var/cache")
 	require.NoError(t, err)
 
-	var manifest DucklakeManifest
+	var manifest ClickHouseManifest
 	require.NoError(t, json.Unmarshal(raw, &manifest))
-	require.True(t, strings.HasSuffix(manifest.ParquetGlob, "parquet/**/*.parquet"))
+	require.True(t, strings.HasSuffix(manifest.ParquetGlob, "lake/source=*/fy=*/month=*/agency=*/company=*/*.parquet"))
+	require.Equal(t, "Parquet", manifest.Format)
 	require.NotZero(t, manifest.GeneratedAt.Unix())
 }

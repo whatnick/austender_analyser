@@ -7,6 +7,6 @@ This directory is reserved for experimental analytics flows and Model Context Pr
 - When adding concrete tools or scripts, include a brief usage note and update this README accordingly.
 
 ## Ideas to Explore
-- Share DuckDB or MotherDuck query snippets that slice the Parquet lake for common spend questions.
+- Share ClickHouse-local query snippets that slice the Parquet lake for common spend questions.
 - Document MCP descriptor JSON that front-loads useful prompts for agents.
 - Capture reproducible analytics workflows (e.g., CSV exports, dashboard queries) for stakeholders.
