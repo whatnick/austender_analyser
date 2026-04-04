@@ -65,6 +65,7 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 		maxConc = len(windows)
 	}
 
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -119,8 +120,11 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	wg.Wait()
 
 	if firstErr != nil {
+		if errors.Is(firstErr, context.Canceled) && parentCtx.Err() == nil {
+			return runVicWithBrowser(parentCtx, fullTarget, req)
+		}
 		if errors.Is(firstErr, errVicForbidden) || strings.Contains(strings.ToLower(firstErr.Error()), "forbidden") {
-			return runVicWithBrowser(ctx, fullTarget, req)
+			return runVicWithBrowser(parentCtx, fullTarget, req)
 		}
 		return "", firstErr
 	}
@@ -411,8 +415,10 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 		var pageHTML string
 		if err := chromedp.Run(ctx,
 			chromedp.WaitVisible(`table`, chromedp.ByQuery),
-			chromedp.OuterHTML(`html`, &pageHTML, chromedp.ByQuery),
 		); err != nil {
+			return "", err
+		}
+		if err := readVicPageHTML(ctx, &pageHTML); err != nil {
 			return "", err
 		}
 
@@ -552,6 +558,16 @@ func waitForVicResultRows(ctx context.Context, timeout time.Duration) error {
 		time.Sleep(300 * time.Millisecond)
 	}
 	return nil
+}
+
+//go:nocover
+func readVicPageHTML(ctx context.Context, out *string) error {
+	if out == nil {
+		return nil
+	}
+	return chromedp.Run(ctx,
+		chromedp.Evaluate(`document.documentElement ? document.documentElement.outerHTML : ''`, out),
+	)
 }
 
 func isVicResultsTable(table *goquery.Selection) bool {
@@ -736,8 +752,10 @@ func fetchVicDetailWithBrowser(ctx context.Context, detailURL string) (string, s
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(detailURL),
 		chromedp.WaitVisible(`table`, chromedp.ByQuery),
-		chromedp.OuterHTML(`html`, &htmlContent, chromedp.ByQuery),
 	); err != nil {
+		return "", "", err
+	}
+	if err := readVicPageHTML(ctx, &htmlContent); err != nil {
 		return "", "", err
 	}
 

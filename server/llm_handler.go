@@ -84,6 +84,12 @@ func llmHandler(w http.ResponseWriter, r *http.Request) {
 	basePrompt := req.Prompt
 
 	var prefetchedContext string
+	if directResp, directContext, ok := directSpendResponse(r.Context(), req.Prompt, strings.TrimSpace(req.Source), lookback, useCache); ok {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(LLMResponse{Result: directResp, Context: directContext})
+		return
+	}
+
 	// If the prompt looks like a spend query, prefetch using the collector cache
 	// and inject context.
 	if pre, err := maybePrefetchSpend(r.Context(), req.Prompt, strings.TrimSpace(req.Source), lookback); err == nil && pre != "" {
@@ -154,9 +160,61 @@ var (
 // maybePrefetchSpend tries to answer spend questions by querying the collector
 // cache and injecting the result.
 func maybePrefetchSpend(ctx context.Context, prompt, sourceHint string, lookback int) (string, error) {
+	req, company, agency, ok := buildSpendQueryRequest(prompt, sourceHint, lookback)
+	if !ok {
+		return "", nil
+	}
+	res, _, err := runSearchWithCache(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	return formatSpendPrefetchContext(req.Source, req.LookbackPeriod, res, company, agency), nil
+}
+
+func directSpendResponse(ctx context.Context, prompt, sourceHint string, lookback int, useCache bool) (string, string, bool) {
+	req, company, agency, ok := buildSpendQueryRequest(prompt, sourceHint, lookback)
+	if !ok {
+		return "", "", false
+	}
+
+	var (
+		res string
+		err error
+	)
+	if useCache {
+		res, _, err = runSearchWithCache(ctx, req)
+	} else {
+		res, err = runScrape(ctx, req)
+	}
+	if err != nil || strings.TrimSpace(res) == "" {
+		return "", "", false
+	}
+
+	contextText := formatSpendPrefetchContext(req.Source, req.LookbackPeriod, res, company, agency)
+	scope := ""
+	if strings.TrimSpace(req.Source) != "" {
+		scope = fmt.Sprintf(" (%s)", strings.ToUpper(req.Source))
+	}
+
+	target := ""
+	switch {
+	case company != "" && agency != "":
+		target = fmt.Sprintf("Total spend on %s by %s%s over the past %d years: %s", company, agency, scope, req.LookbackPeriod, res)
+	case company != "":
+		target = fmt.Sprintf("Total spend on %s%s over the past %d years: %s", company, scope, req.LookbackPeriod, res)
+	case agency != "":
+		target = fmt.Sprintf("Total spend by %s%s over the past %d years: %s", agency, scope, req.LookbackPeriod, res)
+	default:
+		return "", "", false
+	}
+
+	return target, contextText, true
+}
+
+func buildSpendQueryRequest(prompt, sourceHint string, lookback int) (collector.SearchRequest, string, string, bool) {
 	company, agency := parseSpendQuery(prompt)
 	if company == "" && agency == "" {
-		return "", nil
+		return collector.SearchRequest{}, "", "", false
 	}
 	if lookback <= 0 {
 		lookback = 20
@@ -165,28 +223,27 @@ func maybePrefetchSpend(ctx context.Context, prompt, sourceHint string, lookback
 	if source != "" {
 		source = collector.CanonicalSourceID(source)
 	}
-	req := collector.SearchRequest{
+	return collector.SearchRequest{
 		Company:        company,
 		Agency:         agency,
 		Source:         source,
 		LookbackPeriod: lookback,
-	}
-	res, _, err := runSearchWithCache(ctx, req)
-	if err != nil {
-		return "", err
-	}
+	}, company, agency, true
+}
+
+func formatSpendPrefetchContext(source string, lookback int, total, company, agency string) string {
 	scope := ""
 	if strings.TrimSpace(source) != "" {
 		scope = fmt.Sprintf(" (%s)", strings.ToUpper(source))
 	}
-	parts := []string{fmt.Sprintf("Prefetched spend%s over the last %d years: %s", scope, lookback, res)}
+	parts := []string{fmt.Sprintf("Prefetched spend%s over the last %d years: %s", scope, lookback, total)}
 	if company != "" {
 		parts = append(parts, fmt.Sprintf("company=%s", company))
 	}
 	if agency != "" {
 		parts = append(parts, fmt.Sprintf("agency=%s", agency))
 	}
-	return strings.Join(parts, " | "), nil
+	return strings.Join(parts, " | ")
 }
 
 // parseSpendQuery extracts company and agency from common spend prompts.
@@ -218,13 +275,16 @@ func parseSpendQuery(prompt string) (company string, agency string) {
 }
 
 func normalizeEntity(v string) string {
-	v = strings.TrimSpace(v)
-	v = strings.TrimSuffix(v, "?")
-	v = strings.TrimSpace(v)
+	v = strings.TrimSpace(stripEdgeQuotes(v))
+	v = strings.Trim(v, " ?!.\t\r\n")
+	v = strings.Join(strings.Fields(v), " ")
 	if v == "" {
 		return ""
 	}
-	return strings.Title(strings.ToLower(v))
+	if strings.HasPrefix(strings.ToLower(v), "the ") {
+		v = strings.TrimSpace(v[4:])
+	}
+	return v
 }
 
 var spendOnRegex = regexp.MustCompile(`(?i)(?:how\s+much\s+was\s+)?(?:spent|spend|spending)\s+(?:on|with)\s+([^?.!\n]+)`) // covers common spend phrasing

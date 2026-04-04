@@ -447,9 +447,7 @@ func scrapeNswBrowserWindow(ctx context.Context, req SearchRequest, win dateWind
 		// Allow time for AWS WAF JS challenge / async results to complete.
 		_ = waitForNswCards(ctx, 12*time.Second)
 
-		if err := chromedp.Run(ctx,
-			chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
-		); err != nil {
+		if err := readCurrentPageHTML(ctx, &pageHTML); err != nil {
 			return err
 		}
 
@@ -458,8 +456,10 @@ func scrapeNswBrowserWindow(ctx context.Context, req SearchRequest, win dateWind
 			// Give the challenge a bit more time to complete in-browser, then re-read once.
 			if err := chromedp.Run(ctx,
 				chromedp.Sleep(4*time.Second),
-				chromedp.OuterHTML("html", &pageHTML, chromedp.ByQuery),
 			); err != nil {
+				return err
+			}
+			if err := readCurrentPageHTML(ctx, &pageHTML); err != nil {
 				return err
 			}
 		}
@@ -589,6 +589,16 @@ func waitForNswCards(ctx context.Context, timeout time.Duration) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return nil
+}
+
+//go:nocover
+func readCurrentPageHTML(ctx context.Context, out *string) error {
+	if out == nil {
+		return nil
+	}
+	return chromedp.Run(ctx,
+		chromedp.Evaluate(`document.documentElement ? document.documentElement.outerHTML : ''`, out),
+	)
 }
 
 var nswUUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

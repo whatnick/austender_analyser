@@ -52,42 +52,7 @@ var cacheCmd = &cobra.Command{
 			return err
 		}
 
-		if noCache {
-			_, err := RunSearch(context.Background(), SearchRequest{
-				Keyword:        keyword,
-				Company:        company,
-				Agency:         agency,
-				Source:         source,
-				StartDate:      start,
-				EndDate:        end,
-				DateType:       dateType,
-				LookbackPeriod: lookbackPeriod,
-			})
-			return err
-		}
-
-		cache, err := newCacheManager(cacheDir)
-		if err != nil {
-			return err
-		}
-		defer cache.close()
-
-		cachedTotal, cacheHit, err := cache.queryCache(SearchRequest{Keyword: keyword, Company: company, Agency: agency, Source: source})
-		if err != nil {
-			return err
-		}
-		if cacheHit {
-			fmt.Printf("Cache result: %s (before refresh)\n", formatMoneyDecimal(cachedTotal))
-		}
-
-		checkpointKey := cacheKey(keyword, company, agency, dateType, source)
-		resumeFrom, _ := cache.loadCheckpoint(checkpointKey)
-		if !resumeFrom.IsZero() && (start.IsZero() || resumeFrom.After(start)) {
-			start = resumeFrom
-		}
-
-		pool := newLakeWriterPool(cache.lake)
-		_, err = RunSearch(context.Background(), SearchRequest{
+		return runCacheCommand(cmd.Context(), SearchRequest{
 			Keyword:        keyword,
 			Company:        company,
 			Agency:         agency,
@@ -96,30 +61,78 @@ var cacheCmd = &cobra.Command{
 			EndDate:        end,
 			DateType:       dateType,
 			LookbackPeriod: lookbackPeriod,
-			OnAnyMatch: func(ms MatchSummary) {
-				_ = pool.write(ms)
-			},
-			ShouldFetchWindow: func(win dateWindow) bool {
-				return cache.lake.shouldFetchWindow(source, win)
-			},
-		})
-		pool.closeAll()
-		if cache.shouldReindex() {
-			if err := cache.lake.rebuildIndex(context.Background()); err != nil {
-				return err
-			}
-			cache.markReindexed()
-		}
-		if err != nil {
-			return err
-		}
+		}, cacheDir, noCache)
+	},
+}
 
-		finalCheckpoint := end
+func runCacheCommand(ctx context.Context, req SearchRequest, cacheDir string, noCache bool) error {
+	req.Source = normalizeSourceID(req.Source)
+	resolvedLookback := resolveLookbackPeriod(req.LookbackPeriod)
+	startResolved, endResolved := resolveDates(req.StartDate, req.EndDate, resolvedLookback)
+	req.StartDate = startResolved
+	req.EndDate = endResolved
+	req.LookbackPeriod = resolvedLookback
+
+	if noCache {
+		_, err := runSearchFunc(ctx, req)
+		return err
+	}
+
+	cache, err := newCacheManager(cacheDir)
+	if err != nil {
+		return err
+	}
+	defer cache.close()
+
+	checkpointKey := cacheKey(req.Keyword, req.Company, req.Agency, req.DateType, req.Source)
+	resumeFrom, _ := cache.loadCheckpoint(checkpointKey)
+	if cache.lake != nil && windowsCached(cache.lake, req.Source, req.StartDate, req.EndDate) {
+		fmt.Println("Cache fully covers requested windows; skipping refresh.")
+		finalCheckpoint := req.EndDate
 		if finalCheckpoint.IsZero() {
 			finalCheckpoint = time.Now().UTC()
 		}
 		return cache.saveCheckpoint(checkpointKey, finalCheckpoint)
-	},
+	}
+
+	if strings.TrimSpace(req.Keyword) != "" || strings.TrimSpace(req.Company) != "" || strings.TrimSpace(req.Agency) != "" {
+		cachedTotal, cacheHit, err := cache.queryCache(SearchRequest{Keyword: req.Keyword, Company: req.Company, Agency: req.Agency, Source: req.Source, StartDate: req.StartDate, EndDate: req.EndDate, LookbackPeriod: req.LookbackPeriod})
+		if err != nil {
+			return err
+		}
+		if cacheHit {
+			fmt.Printf("Cache result: %s (before refresh)\n", formatMoneyDecimal(cachedTotal))
+		}
+	}
+
+	if !resumeFrom.IsZero() && resumeFrom.After(req.StartDate) && resumeFrom.Before(req.EndDate) {
+		req.StartDate = resumeFrom
+	}
+
+	pool := newLakeWriterPool(cache.lake)
+	req.OnAnyMatch = func(ms MatchSummary) {
+		_ = pool.write(ms)
+	}
+	req.ShouldFetchWindow = func(win dateWindow) bool {
+		return cache.lake.shouldFetchWindow(req.Source, win)
+	}
+	_, err = runSearchFunc(ctx, req)
+	pool.closeAll()
+	if cache.shouldReindex() {
+		if err := cache.lake.rebuildIndex(context.Background()); err != nil {
+			return err
+		}
+		cache.markReindexed()
+	}
+	if err != nil {
+		return err
+	}
+
+	finalCheckpoint := req.EndDate
+	if finalCheckpoint.IsZero() {
+		finalCheckpoint = time.Now().UTC()
+	}
+	return cache.saveCheckpoint(checkpointKey, finalCheckpoint)
 }
 
 // RunSearchWithCache prefers cached totals when available, then fetches and appends

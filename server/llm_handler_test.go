@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tmc/langchaingo/llms"
@@ -169,5 +170,59 @@ func TestLLMHandler_PrefetchSpend_RespectsSourceAndLookback(t *testing.T) {
 	}
 	if resp.Context == "" {
 		t.Fatalf("expected prefetched context to be set")
+	}
+}
+
+func TestLLMHandler_PrefetchSpend_AgencyOnly_StripsLeadingArticle(t *testing.T) {
+	oldNew := newLLMClient
+	newLLMClient = func(modelName, backendOverride string) (llms.Model, error) { return dummyLLM{}, nil }
+	defer func() { newLLMClient = oldNew }()
+
+	oldGen := generateFromPrompt
+	generateFromPrompt = func(ctx context.Context, client llms.Model, prompt string) (string, error) {
+		return `{"final":"ok"}`, nil
+	}
+	defer func() { generateFromPrompt = oldGen }()
+
+	oldSearch := runSearchWithCache
+	var gotReq collector.SearchRequest
+	runSearchWithCache = func(ctx context.Context, req collector.SearchRequest) (string, bool, error) {
+		gotReq = req
+		return "$58,025,063,290.24", true, nil
+	}
+	defer func() { runSearchWithCache = oldSearch }()
+
+	w := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]any{
+		"prompt":         "How much was spent by the Department of Defence ?",
+		"agent":          true,
+		"source":         "federal",
+		"lookbackPeriod": 20,
+		"useCache":       true,
+	})
+	r := httptest.NewRequest(http.MethodPost, "/api/llm", bytes.NewReader(body))
+
+	llmHandler(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if gotReq.Agency != "Department of Defence" {
+		t.Fatalf("expected agency Department of Defence, got %q", gotReq.Agency)
+	}
+	if gotReq.Source != "federal" {
+		t.Fatalf("expected source federal, got %q", gotReq.Source)
+	}
+
+	var resp struct {
+		Context string `json:"context"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.Contains(resp.Context, "Department of Defence") {
+		t.Fatalf("expected prefetched context to mention Department of Defence, got %q", resp.Context)
+	}
+	if strings.Contains(resp.Context, "agency=The Department Of Defence") {
+		t.Fatalf("unexpected unnormalized agency in context: %q", resp.Context)
 	}
 }

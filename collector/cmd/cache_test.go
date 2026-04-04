@@ -109,6 +109,46 @@ func TestRunSearchWithCacheConsistentLookback(t *testing.T) {
 	require.Equal(t, "$123.00", second)
 }
 
+func TestCacheCommandShortCircuitsWhenWindowsCovered(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AUSTENDER_CACHE_DIR", dir)
+	t.Setenv("AUSTENDER_USE_CACHE", "true")
+
+	cache, err := newCacheManager(dir)
+	require.NoError(t, err)
+	defer cache.close()
+
+	releaseDate := time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC)
+	pool := newLakeWriterPool(cache.lake)
+	require.NoError(t, pool.write(MatchSummary{
+		ContractID:  "CN-CACHE-CMD",
+		ReleaseID:   "rel-cache-cmd",
+		OCID:        "ocds-cache-cmd",
+		Supplier:    "Vendor",
+		Agency:      "Defence",
+		Title:       "Covered window",
+		Amount:      decimal.NewFromInt(5),
+		ReleaseDate: releaseDate,
+	}))
+	pool.closeAll()
+
+	oldRun := runSearchFunc
+	called := false
+	runSearchFunc = func(ctx context.Context, req SearchRequest) (string, error) {
+		called = true
+		return "$0.00", nil
+	}
+	defer func() { runSearchFunc = oldRun }()
+
+	err = runCacheCommand(context.Background(), SearchRequest{
+		Source:    defaultSourceID,
+		StartDate: time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
+		EndDate:   time.Date(2024, time.January, 31, 0, 0, 0, 0, time.UTC),
+	}, dir, false)
+	require.NoError(t, err)
+	require.False(t, called, "expected cache command to skip refresh when windows are already covered")
+}
+
 func TestQueryCacheRespectsDateRange(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := newCacheManager(dir)
