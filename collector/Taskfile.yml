@@ -46,3 +46,14 @@ tasks:
         cache_dir="${AUSTENDER_CACHE_DIR:-$HOME/.cache/austender}"
         go run . cache {{.CLI_ARGS}}
         go run . reindex-lake --cache-dir "$cache_dir"
+
+  prime-lake-all:
+    desc: Prime the parquet lake/catalog for every jurisdiction, then reindex once
+    cmds:
+      - |
+        set -euo pipefail
+        cache_dir="${AUSTENDER_CACHE_DIR:-$HOME/.cache/austender}"
+        for source in federal nsw vic qld sa wa; do
+          go run . cache --cache-dir "$cache_dir" --source "$source" {{.CLI_ARGS}}
+        done
+        go run . reindex-lake --cache-dir "$cache_dir"

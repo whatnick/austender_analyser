@@ -3,7 +3,7 @@
 Welcome to the Austender Analyser mono-repo. This guide summarises how the pieces fit together and the quickest paths to productivity.
 
 ## What the Project Delivers
-- Answers “how much has the government spent with <keyword>?” by scraping [Austender](https://www.tenders.gov.au) and aligned state portals (NSW, VIC, SA, WA).
+- Answers “how much has the government spent with <keyword>?” by scraping [Austender](https://www.tenders.gov.au) and aligned state portals (NSW, VIC, QLD, SA, WA).
 - Provides a Go CLI (`collector`) for scraping and cache priming, a Go HTTP/Lambda server (`server`) for REST + MCP + LLM access, and Go CDK infrastructure (`infra`) to deploy the stack.
 - Ships a minimal HTMX frontend (`frontend`) that exercises `/api/llm`, auto-detects LLM backends, and can attach MCP configurations.
 - Maintains a Parquet lake + ClickHouse-friendly JSON index under `~/.cache/austender`, partitioned by FY/month/agency/company. Runs skip month partitions already present and keep keyword/company/agency filters optional for broad warming.
@@ -31,7 +31,7 @@ Prereqs: Go 1.25+, Task (<https://taskfile.dev/#/installation>) or Bash + GNU to
 | Server tests | `task server:test` | `bash hack/test-server.sh` |
 | Infra synth/deploy | `task infra:synth` / `task infra:deploy` | `cd infra && cdk synth|deploy` |
 
-Add `--source federal|nsw|vic|sa|wa` to collector commands to target a specific jurisdiction. `--c` filters by company, `--d` by agency, and `--k` by keyword. Date filters use `--start-date`, `--end-date`, and `--date-type` (defaults to `contractPublished`).
+Add `--source federal|nsw|vic|qld|sa|wa` to collector commands to target a specific jurisdiction. Use `task collector:prime-lake-all -- --lookback-period 5` when you need to warm every jurisdiction into the ClickHouse-backed lake. `--c` filters by company, `--d` by agency, and `--k` by keyword. Date filters use `--start-date`, `--end-date`, and `--date-type` (defaults to `contractPublished`).
 
 ## Development Workflow
 1. Shape scraping logic in `collector/` first so both CLI and server reuse it.

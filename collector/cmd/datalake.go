@@ -36,18 +36,22 @@ func (l *dataLake) ensureSchema() error {
 }
 
 type lakeSink struct {
-	mu          sync.Mutex
-	w           *parquet.GenericWriter[parquetRow]
-	file        *os.File
-	lake        *dataLake
-	sourceKey   string
-	fy          string
-	month       string
-	agencyKey   string
-	agencyName  string
-	companyKey  string
-	companyName string
-	rows        int64
+	mu            sync.Mutex
+	w             *parquet.GenericWriter[parquetRow]
+	file          *os.File
+	lake          *dataLake
+	sourceKey     string
+	fy            string
+	month         string
+	agencyKey     string
+	agencyID      string
+	agencyName    string
+	agencyTokens  []string
+	companyKey    string
+	companyID     string
+	companyName   string
+	companyTokens []string
+	rows          int64
 }
 
 // lakeWriterPool lazily opens sinks per partition derived from match content.
@@ -76,6 +80,8 @@ func (l *dataLake) newSink(source string, ts time.Time, agency, company string) 
 	if co == "" {
 		co = "unknown_company"
 	}
+	agencyEntity := resolveIndexedEntity("agency", agency, ag, "", nil)
+	companyEntity := resolveIndexedEntity("company", company, co, "", nil)
 	dir := filepath.Join(l.baseDir, "lake", fmt.Sprintf("source=%s", sourceKey), financialYearLabel(ts), month, fmt.Sprintf("agency=%s", ag), fmt.Sprintf("company=%s", co))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -86,7 +92,22 @@ func (l *dataLake) newSink(source string, ts time.Time, agency, company string) 
 		return nil, err
 	}
 	w := parquet.NewGenericWriter[parquetRow](f, parquet.Compression(&snappy.Codec{}))
-	return &lakeSink{w: w, file: f, lake: l, sourceKey: sourceKey, fy: fy, month: month, agencyKey: ag, agencyName: strings.TrimSpace(agency), companyKey: co, companyName: strings.TrimSpace(company)}, nil
+	return &lakeSink{
+		w:             w,
+		file:          f,
+		lake:          l,
+		sourceKey:     sourceKey,
+		fy:            fy,
+		month:         month,
+		agencyKey:     ag,
+		agencyID:      agencyEntity.identifier,
+		agencyName:    strings.TrimSpace(agency),
+		agencyTokens:  agencyEntity.tokens,
+		companyKey:    co,
+		companyID:     companyEntity.identifier,
+		companyName:   strings.TrimSpace(company),
+		companyTokens: companyEntity.tokens,
+	}, nil
 }
 
 func (s *lakeSink) write(ms MatchSummary) {
@@ -133,8 +154,12 @@ func (s *lakeSink) close() *columnarFileMeta {
 		Month:         s.month,
 		AgencyKey:     s.agencyKey,
 		AgencyName:    s.agencyName,
+		AgencyID:      s.agencyID,
+		AgencyTokens:  s.agencyTokens,
 		CompanyKey:    s.companyKey,
 		CompanyName:   s.companyName,
+		CompanyID:     s.companyID,
+		CompanyTokens: s.companyTokens,
 		RowCount:      s.rows,
 		CreatedAt:     time.Now().UTC(),
 	}
@@ -213,8 +238,12 @@ func (l *dataLake) rebuildIndex(ctx context.Context) error {
 			Month:         monthLabelFromPath(path),
 			AgencyKey:     ag,
 			AgencyName:    ag,
+			AgencyID:      canonicalEntityIdentifier("agency", ag),
+			AgencyTokens:  entityTokens("agency", ag),
 			CompanyKey:    co,
 			CompanyName:   co,
+			CompanyID:     canonicalEntityIdentifier("company", co),
+			CompanyTokens: entityTokens("company", co),
 			RowCount:      rowCount,
 			CreatedAt:     time.Now().UTC(),
 		})
@@ -256,6 +285,7 @@ type decimalSumResult struct {
 
 // sumParquetFile sums amounts in a parquet file that match filters.
 func sumParquetFile(path string, filters SearchRequest) (decimal.Decimal, bool, error) {
+	matcher := compileSearchMatcher(filters)
 	f, err := os.Open(path)
 	if err != nil {
 		return decimal.Zero, false, err
@@ -285,7 +315,7 @@ func sumParquetFile(path string, filters SearchRequest) (decimal.Decimal, bool, 
 		n, readErr := r.Read(batch)
 		if n > 0 {
 			for _, row := range batch[:n] {
-				if rowMatches(row, filters) {
+				if matcher.matches(row) {
 					matched = true
 					total = total.Add(decimal.NewFromFloat(row.Amount))
 				}
@@ -371,6 +401,7 @@ func (l *dataLake) queryContracts(ctx context.Context, filters SearchRequest, li
 // readParquetContracts reads matching rows from a single parquet file up to limit.
 // seen tracks already-emitted ContractIDs to avoid duplicates across files.
 func readParquetContracts(path string, filters SearchRequest, limit int, seen map[string]struct{}) ([]ContractRecord, decimal.Decimal, error) {
+	matcher := compileSearchMatcher(filters)
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, decimal.Zero, err
@@ -401,7 +432,7 @@ func readParquetContracts(path string, filters SearchRequest, limit int, seen ma
 		n, readErr := r.Read(batch)
 		if n > 0 {
 			for _, row := range batch[:n] {
-				if rowMatches(row, filters) {
+				if matcher.matches(row) {
 					// Deduplicate by ContractID+Source to keep latest version
 					deduKey := row.ContractID + "|" + row.Source
 					if _, dup := seen[deduKey]; dup {

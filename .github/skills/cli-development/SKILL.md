@@ -11,7 +11,7 @@ Repo-specific workflow for the collector CLI and reusable data-layer helpers in 
 ## When to Use
 - Editing files in `collector/`.
 - Changing Cobra commands, cache behavior, query helpers, or ClickHouse-backed analytics flows.
-- Updating scraping sources for federal, NSW, VIC, SA, WA, or adding a new jurisdiction.
+- Updating scraping sources for federal, NSW, VIC, QLD, SA, WA, or adding a new jurisdiction.
 - Modifying the parquet lake, `clickhouse-index.json`, or collector test and smoke coverage.
 
 ## Constraints

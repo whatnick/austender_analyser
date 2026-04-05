@@ -7,7 +7,7 @@ Serverless-first Go stack that scrapes Australian government contract data, pers
 
 ## Highlights
 - Collector CLI streams OCDS releases into a partitioned Parquet lake with a ClickHouse-friendly JSON index under `~/.cache/austender` (override with `AUSTENDER_CACHE_DIR`).
-- Dedicated adapters for federal, NSW, VIC, SA, and WA portals selectable via `--source`; each run skips month partitions already present in the lake.
+- Dedicated adapters for federal, NSW, VIC, QLD, SA, and WA portals selectable via `--source`; each run skips month partitions already present in the lake.
 - Server shares collector helpers, adds a same-day in-memory cache, and exposes REST, MCP, and LLM endpoints.
 - Chat-style HTMX frontend targets `/api/llm`, auto-detects available LLM backends (OpenAI or Ollama), and can attach MCP configs on demand.
 - Infrastructure-as-code stack (Go CDK) packages the API for Lambda+API Gateway and fronts the static site with S3+CloudFront.
@@ -39,7 +39,8 @@ Prerequisites: Go 1.25+, a browser, and optionally [Task](https://taskfile.dev/#
 - Run both server + frontend helpers: `task run:local`
 - Execute tests with coverage for all modules: `task test:all`
 - Build collector binary into `dist/collector`: `task collector:build`
-- Prime the Parquet lake and refresh catalog: `task collector:prime-lake -- --lookback-period 5`
+- Prime one jurisdiction and refresh the catalog: `task collector:prime-lake -- --lookback-period 5`
+- Prime every jurisdiction into the ClickHouse-backed lake: `task collector:prime-lake-all -- --lookback-period 5`
 
 ### Shell Equivalents
 - `bash hack/run-server.sh`
@@ -51,7 +52,7 @@ Prerequisites: Go 1.25+, a browser, and optionally [Task](https://taskfile.dev/#
 ### Collector CLI Cheat Sheet
 - Run ad-hoc scrape: `cd collector && go run . --k KPMG`
 - Filter by company or agency: add `--c <company>` or `--d <agency>`
-- Switch jurisdiction: append `--source federal|nsw|vic|sa|wa`
+- Switch jurisdiction: append `--source federal|nsw|vic|qld|sa|wa`
 - Control date window: `--start-date YYYY-MM-DD`, `--end-date YYYY-MM-DD`, `--date-type contractPublished|contractStart|contractEnd|contractLastModified`
 - Override lookback when no start provided: `--lookback-period <years>` (defaults to 20 or `AUSTENDER_LOOKBACK_PERIOD`)
 
@@ -76,7 +77,7 @@ Prerequisites: Go 1.25+, a browser, and optionally [Task](https://taskfile.dev/#
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full deployment guide covering local development, Docker, AWS Serverless (Lambda + CloudFront), Fly.io, ECS Fargate, and CI/CD automation.
 
 ## Architecture Overview
-- Collector streams OCDS releases into a lake partitioned by FY/month/agency/company; concurrent runs skip existing month partitions. Cache lives under `~/.cache/austender` unless overridden.
+- Collector streams OCDS releases into a lake partitioned by source/FY/month/agency/company; concurrent runs skip existing month partitions. Cache lives under `~/.cache/austender` unless overridden.
 - Server normalizes requests into `collector.SearchRequest`, layers a same-day in-memory cache on top of the lake, and powers REST + MCP + LLM endpoints with consistent behavior.
 - LLM handler wraps langchaingo, supports OpenAI and Ollama backends, and runs an internal tool-using agent capable of jurisdiction detection, catalog lookup, and contract aggregation.
 - Frontend is static HTMX + Bootstrap; no build tooling required.

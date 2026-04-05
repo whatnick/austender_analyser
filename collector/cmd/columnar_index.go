@@ -12,7 +12,7 @@ import (
 )
 
 const columnarIndexFileName = "clickhouse-index.json"
-const columnarIndexVersion = 1
+const columnarIndexVersion = 2
 
 type columnarFileMeta struct {
 	Path          string    `json:"path"`
@@ -21,8 +21,12 @@ type columnarFileMeta struct {
 	Month         string    `json:"month"`
 	AgencyKey     string    `json:"agencyKey"`
 	AgencyName    string    `json:"agencyName,omitempty"`
+	AgencyID      string    `json:"agencyId,omitempty"`
+	AgencyTokens  []string  `json:"agencyTokens,omitempty"`
 	CompanyKey    string    `json:"companyKey"`
 	CompanyName   string    `json:"companyName,omitempty"`
+	CompanyID     string    `json:"companyId,omitempty"`
+	CompanyTokens []string  `json:"companyTokens,omitempty"`
 	RowCount      int64     `json:"rowCount"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
@@ -69,6 +73,12 @@ func (i *columnarIndex) load() error {
 	}
 
 	i.state = state
+	for path, meta := range i.state.Files {
+		if meta.Path == "" {
+			meta.Path = path
+		}
+		i.state.Files[path] = prepareColumnarMeta(meta)
+	}
 	i.ensureStateLocked()
 	return nil
 }
@@ -120,7 +130,7 @@ func (i *columnarIndex) replaceFiles(files []columnarFileMeta) error {
 		if meta.Path == "" {
 			continue
 		}
-		meta.Source = normalizeSourceID(meta.Source)
+		meta = prepareColumnarMeta(meta)
 		i.state.Files[meta.Path] = meta
 		i.state.CoveredMonths[monthCoverageKey(meta.Source, meta.Month)] = meta.Path
 	}
@@ -136,7 +146,7 @@ func (i *columnarIndex) upsertFiles(files []columnarFileMeta) error {
 		if meta.Path == "" {
 			continue
 		}
-		meta.Source = normalizeSourceID(meta.Source)
+		meta = prepareColumnarMeta(meta)
 		i.state.Files[meta.Path] = meta
 		i.state.CoveredMonths[monthCoverageKey(meta.Source, meta.Month)] = meta.Path
 	}
@@ -180,26 +190,25 @@ func (i *columnarIndex) filesMatching(filters SearchRequest) []columnarFileMeta 
 	if strings.TrimSpace(filters.Source) != "" {
 		sourceKey = normalizeSourceID(filters.Source)
 	}
-	agencyKey := sanitizePartitionComponent(filters.Agency)
-	agencyName := strings.ToLower(strings.TrimSpace(filters.Agency))
-	companyKey := sanitizePartitionComponent(filters.Company)
-	companyName := strings.ToLower(strings.TrimSpace(filters.Company))
+	agencyFilter := compileEntityFilter("agency", filters.Agency)
+	companyFilter := compileEntityFilter("company", filters.Company)
 	minFy := ""
 	if filters.LookbackPeriod > 0 {
 		minFy = strings.TrimPrefix(financialYearLabel(time.Now().AddDate(-filters.LookbackPeriod, 0, 0)), "fy=")
 	}
 
 	for _, meta := range i.state.Files {
+		meta = prepareColumnarMeta(meta)
 		if sourceKey != "" && normalizeSourceID(meta.Source) != sourceKey {
 			continue
 		}
 		if minFy != "" && meta.FinancialYear < minFy {
 			continue
 		}
-		if agencyName != "" && !strings.Contains(meta.AgencyKey, agencyKey) && !strings.Contains(strings.ToLower(meta.AgencyName), agencyName) {
+		if agencyFilter.active() && !agencyFilter.matches(meta.agencyEntity()) {
 			continue
 		}
-		if companyName != "" && !strings.Contains(meta.CompanyKey, companyKey) && !strings.Contains(strings.ToLower(meta.CompanyName), companyName) {
+		if companyFilter.active() && !companyFilter.matches(meta.companyEntity()) {
 			continue
 		}
 		out = append(out, meta)
@@ -221,4 +230,25 @@ func columnarIndexPath(baseDir string) string {
 
 func monthCoverageKey(source, month string) string {
 	return normalizeSourceID(source) + "|" + strings.TrimSpace(month)
+}
+
+func prepareColumnarMeta(meta columnarFileMeta) columnarFileMeta {
+	meta.Source = normalizeSourceID(meta.Source)
+	agency := resolveIndexedEntity("agency", meta.AgencyName, meta.AgencyKey, meta.AgencyID, meta.AgencyTokens)
+	meta.AgencyKey = agency.partitionKey
+	meta.AgencyID = agency.identifier
+	meta.AgencyTokens = agency.tokens
+	company := resolveIndexedEntity("company", meta.CompanyName, meta.CompanyKey, meta.CompanyID, meta.CompanyTokens)
+	meta.CompanyKey = company.partitionKey
+	meta.CompanyID = company.identifier
+	meta.CompanyTokens = company.tokens
+	return meta
+}
+
+func (m columnarFileMeta) agencyEntity() indexedEntity {
+	return resolveIndexedEntity("agency", m.AgencyName, m.AgencyKey, m.AgencyID, m.AgencyTokens)
+}
+
+func (m columnarFileMeta) companyEntity() indexedEntity {
+	return resolveIndexedEntity("company", m.CompanyName, m.CompanyKey, m.CompanyID, m.CompanyTokens)
 }

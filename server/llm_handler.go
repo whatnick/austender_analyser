@@ -500,7 +500,7 @@ Available tools:
 1) identify_jurisdiction
   - arguments: {"text": string}
   - returns: {"source": string, "evidence": string}
-  - source is one of: federal|nsw|vic|sa|wa (or empty)
+	- source is one of: federal|nsw|vic|qld|sa|wa (or empty)
 
 2) find_companies
   - arguments: {"source": string (optional), "query": string (optional), "limit": int (optional)}

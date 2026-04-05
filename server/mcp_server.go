@@ -90,7 +90,7 @@ func registerMCPTools(srv *mcpserver.MCPServer) {
 }
 
 type findEntitiesArgs struct {
-	Source string `json:"source,omitempty" jsonschema_description:"Jurisdiction/source identifier (e.g. federal, vic, nsw, sa, wa). When omitted, searches across all sources."`
+	Source string `json:"source,omitempty" jsonschema_description:"Jurisdiction/source identifier (e.g. federal, vic, nsw, qld, sa, wa). When omitted, searches across all sources."`
 	Query  string `json:"query,omitempty" jsonschema_description:"Substring query for narrowing results (optional)."`
 	Limit  int    `json:"limit,omitempty" jsonschema_description:"Maximum candidates to return (default 10, max 50)."`
 }
@@ -157,7 +157,7 @@ type identifyJurisdictionArgs struct {
 }
 
 type identifyJurisdictionResult struct {
-	Source   string `json:"source" jsonschema_description:"Canonical source ID (federal|nsw|vic|sa|wa) or empty when unknown"`
+	Source   string `json:"source" jsonschema_description:"Canonical source ID (federal|nsw|vic|qld|sa|wa) or empty when unknown"`
 	Evidence string `json:"evidence" jsonschema_description:"Short explanation of how the source was detected"`
 }
 
@@ -175,7 +175,7 @@ type aggregateContractsArgs struct {
 	Company        string `json:"company,omitempty" jsonschema_description:"Supplier filter (optional)"`
 	CompanyName    string `json:"companyName,omitempty" jsonschema_description:"Alias supplier filter"`
 	Agency         string `json:"agency,omitempty" jsonschema_description:"Agency filter"`
-	Source         string `json:"source,omitempty" jsonschema_description:"Jurisdiction/source identifier (e.g. federal, vic, nsw, sa, wa)"`
+	Source         string `json:"source,omitempty" jsonschema_description:"Jurisdiction/source identifier (e.g. federal, vic, nsw, qld, sa, wa)"`
 	StartDate      string `json:"startDate,omitempty" jsonschema_description:"Start date (YYYY-MM-DD or RFC3339)"`
 	EndDate        string `json:"endDate,omitempty" jsonschema_description:"End date (YYYY-MM-DD or RFC3339)"`
 	DateType       string `json:"dateType,omitempty" jsonschema_description:"OCDS date bucket"`

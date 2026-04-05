@@ -66,15 +66,7 @@ func findEntitiesFromCatalog(ctx context.Context, kind string, opts EntityLookup
 }
 
 func queryEntities(kind string, files []columnarFileMeta, source, q string, limit int) EntityLookupResult {
-	var keyCol, nameCol string
-	switch kind {
-	case "agency":
-		keyCol = "agency"
-		nameCol = "agencyName"
-	case "company":
-		keyCol = "company"
-		nameCol = "companyName"
-	default:
+	if kind != "agency" && kind != "company" {
 		return EntityLookupResult{Candidates: []EntityCandidate{}, Evidence: fmt.Sprintf("unknown entity kind: %s", kind)}
 	}
 
@@ -83,18 +75,19 @@ func queryEntities(kind string, files []columnarFileMeta, source, q string, limi
 		name   string
 		key    string
 		rows   int64
+		score  int
 	}
 	agg := make(map[string]*aggregate)
 
-	query := strings.ToLower(strings.TrimSpace(q))
 	sourceKey := ""
 	if strings.TrimSpace(source) != "" {
 		sourceKey = normalizeSourceID(source)
 	}
+	filter := compileEntityFilter(kind, q)
 
 	out := EntityLookupResult{Candidates: []EntityCandidate{}}
-	if query != "" {
-		out.Evidence = fmt.Sprintf("substring match: %q", query)
+	if filter.active() {
+		out.Evidence = fmt.Sprintf("normalized %s match: %q", kind, strings.TrimSpace(q))
 	} else {
 		out.Evidence = "top entities from columnar index"
 	}
@@ -104,28 +97,28 @@ func queryEntities(kind string, files []columnarFileMeta, source, q string, limi
 			continue
 		}
 
-		var key, name string
-		switch keyCol {
+		var entity indexedEntity
+		switch kind {
 		case "agency":
-			key = meta.AgencyKey
-			name = strings.TrimSpace(meta.AgencyName)
+			entity = meta.agencyEntity()
 		case "company":
-			key = meta.CompanyKey
-			name = strings.TrimSpace(meta.CompanyName)
+			entity = meta.companyEntity()
 		}
-		if name == "" {
-			name = key
+		if filter.active() && !filter.matches(entity) {
+			continue
 		}
-		if query != "" {
-			if !strings.Contains(strings.ToLower(name), query) && !strings.Contains(strings.ToLower(key), sanitizePartitionComponent(query)) {
-				continue
-			}
-		}
-		aggKey := normalizeSourceID(meta.Source) + "|" + key + "|" + name + "|" + nameCol
+		aggKey := normalizeSourceID(meta.Source) + "|" + entity.identifier
 		item := agg[aggKey]
 		if item == nil {
-			item = &aggregate{source: normalizeSourceID(meta.Source), name: name, key: key}
+			item = &aggregate{source: normalizeSourceID(meta.Source), name: entity.displayName, key: entity.partitionKey}
 			agg[aggKey] = item
+		}
+		item.name = preferredEntityName(item.name, entity.displayName)
+		if item.key == "" {
+			item.key = entity.partitionKey
+		}
+		if score := filter.score(entity); score > item.score {
+			item.score = score
 		}
 		item.rows += meta.RowCount
 	}
@@ -135,6 +128,9 @@ func queryEntities(kind string, files []columnarFileMeta, source, q string, limi
 		ranked = append(ranked, *item)
 	}
 	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
 		if ranked[i].rows == ranked[j].rows {
 			if ranked[i].name == ranked[j].name {
 				return ranked[i].source < ranked[j].source

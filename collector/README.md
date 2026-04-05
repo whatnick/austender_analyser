@@ -3,8 +3,8 @@
 Colly-powered CLI used for scraping Austender (federal) and state procurement portals, priming the Parquet lake, and exposing reusable helpers for the server.
 
 ## Capabilities
-- Streams OCDS releases into `~/.cache/austender/lake/fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>` with metadata tracked in `clickhouse-index.json`.
-- Supports keyword (`--k`), company (`--c`), agency (`--d`), and jurisdiction (`--source federal|nsw|vic|sa|wa`) filters. Filters are optional when priming the cache.
+- Streams OCDS releases into `~/.cache/austender/lake/source=<id>/fy=YYYY-YY/month=YYYY-MM/agency=<key>/company=<key>` with metadata tracked in `clickhouse-index.json`.
+- Supports keyword (`--k`), company (`--c`), agency (`--d`), and jurisdiction (`--source federal|nsw|vic|qld|sa|wa`) filters. Filters are optional when priming the cache.
 - Implements skip logic to avoid re-fetching month partitions already present in the lake.
 - Provides reindexing (`reindex-lake`) to reconcile the catalog with on-disk Parquet files.
 - Exports helpers such as `RunSearchWithCache`, jurisdiction detection, and catalog lookups for server reuse.
@@ -13,6 +13,7 @@ Colly-powered CLI used for scraping Austender (federal) and state procurement po
 - `go run . --k KPMG` – aggregate spend using keyword match (defaults to 20-year lookback when start date omitted).
 - `go run . --c Accenture --source nsw` – constrain to company + jurisdiction.
 - `go run . cache --lookback-period 5` – hydrate the cache across five years before re-running `reindex-lake` automatically (used by `task collector:prime-lake`).
+- `task collector:prime-lake-all -- --lookback-period 5` – warm the ClickHouse-backed lake across every supported jurisdiction before one final reindex.
 - `go run . reindex-lake --cache-dir <path>` – rebuild `clickhouse-index.json` when files change out of band.
 
 ## Environment Variables
@@ -27,5 +28,6 @@ Colly-powered CLI used for scraping Austender (federal) and state procurement po
 
 ## Notes
 - The CLI’s root command mirrors `collector cache` semantics. When no filters are supplied it hydrates the entire date window to keep the cache broad.
+- Company and agency matching now uses normalized identifiers, so queries like `Dept. of Finance` and `KPMG Pty Ltd` resolve against the same cached entities as `Department of Finance` and `KPMG`.
 - Long flag names follow the single-letter IDs (`--k`, `--c`, `--d`); Cobra does not expose extended aliases today.
 - Server requests flow through the same `RunSearchWithCache` code path, so changes here propagate to `/api/scrape` and the LLM agent automatically.

@@ -447,46 +447,66 @@ func (m *cacheManager) queryCache(filters SearchRequest) (decimal.Decimal, bool,
 	return res.total, matched, nil
 }
 
-func rowMatches(row parquetRow, filters SearchRequest) bool {
-	if normalized := strings.TrimSpace(filters.Source); normalized != "" {
+type compiledSearchMatcher struct {
+	source  string
+	keyword string
+	company compiledEntityFilter
+	agency  compiledEntityFilter
+	start   time.Time
+	end     time.Time
+}
+
+func compileSearchMatcher(filters SearchRequest) compiledSearchMatcher {
+	source := ""
+	if strings.TrimSpace(filters.Source) != "" {
+		source = normalizeSourceID(strings.TrimSpace(filters.Source))
+	}
+	return compiledSearchMatcher{
+		source:  source,
+		keyword: strings.ToLower(strings.TrimSpace(filters.Keyword)),
+		company: compileEntityFilter("company", filters.Company),
+		agency:  compileEntityFilter("agency", filters.Agency),
+		start:   filters.StartDate.UTC(),
+		end:     filters.EndDate.UTC(),
+	}
+}
+
+func (m compiledSearchMatcher) matches(row parquetRow) bool {
+	if m.source != "" {
 		rowSource := row.Source
 		if rowSource == "" {
 			rowSource = defaultSourceID
 		}
-		if normalizeSourceID(normalized) != normalizeSourceID(rowSource) {
+		if normalizeSourceID(rowSource) != m.source {
 			return false
 		}
 	}
-	if !filters.StartDate.IsZero() {
+	if !m.start.IsZero() || !m.end.IsZero() {
 		rowTime := time.Unix(0, row.ReleaseEpoch*int64(time.Millisecond)).UTC()
-		if rowTime.Before(filters.StartDate.UTC()) {
+		if !m.start.IsZero() && rowTime.Before(m.start) {
+			return false
+		}
+		if !m.end.IsZero() && rowTime.After(m.end) {
 			return false
 		}
 	}
-	if !filters.EndDate.IsZero() {
-		rowTime := time.Unix(0, row.ReleaseEpoch*int64(time.Millisecond)).UTC()
-		if rowTime.After(filters.EndDate.UTC()) {
-			return false
-		}
-	}
-
-	kw := strings.ToLower(filters.Keyword)
-	comp := strings.ToLower(filters.Company)
-	agency := strings.ToLower(filters.Agency)
-
-	if kw != "" {
+	if m.keyword != "" {
 		hay := strings.ToLower(row.Supplier + " " + row.Title + " " + row.Agency + " " + row.ContractID)
-		if !strings.Contains(hay, kw) {
+		if !strings.Contains(hay, m.keyword) {
 			return false
 		}
 	}
-	if comp != "" && !strings.Contains(strings.ToLower(row.Supplier), comp) {
+	if m.company.active() && !m.company.matches(resolveIndexedEntity("company", row.Supplier, row.CompanyKey, "", nil)) {
 		return false
 	}
-	if agency != "" && !strings.Contains(strings.ToLower(row.Agency), agency) {
+	if m.agency.active() && !m.agency.matches(resolveIndexedEntity("agency", row.Agency, row.AgencyKey, "", nil)) {
 		return false
 	}
 	return true
+}
+
+func rowMatches(row parquetRow, filters SearchRequest) bool {
+	return compileSearchMatcher(filters).matches(row)
 }
 
 type parquetRow struct {

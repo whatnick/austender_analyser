@@ -7,6 +7,7 @@ toolchain go1.25.5
 require (
 	github.com/aws/aws-lambda-go v1.51.1
 	github.com/mark3labs/mcp-go v0.43.2
+	github.com/parquet-go/parquet-go v0.26.3
 	github.com/tmc/langchaingo v0.1.14
 	github.com/whatnick/austender_analyser/collector v0.0.0
 )
@@ -49,7 +50,6 @@ require (
 	github.com/nlnwa/whatwg-url v0.6.2 // indirect
 	github.com/parquet-go/bitpack v1.0.0 // indirect
 	github.com/parquet-go/jsonlite v1.1.0 // indirect
-	github.com/parquet-go/parquet-go v0.26.3 // indirect
 	github.com/pierrec/lz4/v4 v4.1.23 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pkoukk/tiktoken-go v0.1.8 // indirect

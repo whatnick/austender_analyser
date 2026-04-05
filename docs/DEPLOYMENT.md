@@ -53,6 +53,9 @@ task collector:prime-lake -- --lookback-period 5
 
 # Prime a specific jurisdiction
 cd collector && go run . cache --source nsw --lookback-period 3
+
+# Prime every supported jurisdiction into the ClickHouse-backed lake
+task collector:prime-lake-all -- --lookback-period 5
 ```
 
 ### Verifying the server
