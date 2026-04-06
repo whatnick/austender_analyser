@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,8 @@ const vicSourceID = "vic"
 const vicSearchURL = "https://www.tenders.vic.gov.au/contract/search"
 
 var errVicForbidden = errors.New("vic scrape forbidden")
+
+var vicPublicBodyRe = regexp.MustCompile(`(?i)public body\s+(.+?)\s+contract number`)
 
 // Chrome-like UA to reduce blocks.
 const vicUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -475,6 +478,28 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 			if cells.Length() > 7 {
 				supplier = getText(7)
 			}
+			detailLink := ""
+			if href, ok := s.Find("a").First().Attr("href"); ok {
+				detailLink = strings.TrimSpace(href)
+			}
+			if detailLink != "" {
+				if base, err := url.Parse(vicSearchURL); err == nil {
+					if ref, err := url.Parse(detailLink); err == nil {
+						detailLink = base.ResolveReference(ref).String()
+					}
+				}
+			}
+			if (agency == "" || supplier == "") && detailLink != "" && ctx.Err() == nil {
+				detailAgency, detailSupplier, detailErr := fetchVicDetail(ctx, detailLink)
+				if detailErr == nil {
+					if agency == "" {
+						agency = detailAgency
+					}
+					if supplier == "" {
+						supplier = detailSupplier
+					}
+				}
+			}
 
 			if supplier == "" && req.Company != "" {
 				supplier = req.Company
@@ -646,7 +671,7 @@ func fetchVicDetailWithColly(ctx context.Context, detailURL string) (string, str
 		r.Headers.Set("Referer", vicSearchURL)
 	})
 
-	var agency, supplier string
+	var htmlContent string
 	var scrapeErr error
 	done := make(chan struct{})
 
@@ -654,17 +679,14 @@ func fetchVicDetailWithColly(ctx context.Context, detailURL string) (string, str
 		scrapeErr = err
 	})
 
+	collector.OnResponse(func(r *colly.Response) {
+		if r != nil {
+			htmlContent = string(r.Body)
+		}
+	})
+
 	collector.OnHTML("table", func(e *colly.HTMLElement) {
-		e.ForEach("tr", func(_ int, tr *colly.HTMLElement) {
-			label := strings.ToLower(strings.TrimSpace(tr.ChildText("th")))
-			val := strings.TrimSpace(tr.ChildText("td"))
-			switch label {
-			case "issued by":
-				agency = val
-			case "supplier":
-				supplier = val
-			}
-		})
+		_ = e
 	})
 
 	collector.OnScraped(func(_ *colly.Response) {
@@ -678,13 +700,13 @@ func fetchVicDetailWithColly(ctx context.Context, detailURL string) (string, str
 	select {
 	case <-done:
 	case <-ctx.Done():
-		return agency, supplier, ctx.Err()
+		return "", "", ctx.Err()
 	}
 
 	if scrapeErr != nil {
-		return agency, supplier, scrapeErr
+		return "", "", scrapeErr
 	}
-	return agency, supplier, nil
+	return parseVicDetailHTML(htmlContent)
 }
 
 func buildVicTitle(title, status string) string {
@@ -759,22 +781,40 @@ func fetchVicDetailWithBrowser(ctx context.Context, detailURL string) (string, s
 		return "", "", err
 	}
 
+	return parseVicDetailHTML(htmlContent)
+}
+
+func parseVicDetailHTML(htmlContent string) (string, string, error) {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
 	if err != nil {
 		return "", "", err
 	}
-
-	var agency, supplier string
-	doc.Find("table tr").Each(func(_ int, tr *goquery.Selection) {
-		label := strings.ToLower(strings.TrimSpace(tr.Find("th").Text()))
-		val := strings.TrimSpace(tr.Find("td").Text())
-		switch label {
-		case "issued by":
-			agency = val
-		case "supplier":
-			supplier = val
-		}
-	})
-
+	agency, supplier := parseVicDetailDocument(doc)
 	return agency, supplier, nil
+}
+
+func parseVicDetailDocument(doc *goquery.Document) (string, string) {
+	if doc == nil {
+		return "", ""
+	}
+	agency := ""
+	supplier := strings.TrimSpace(doc.Find(".contractor-details b, .contractor-details .strong").First().Text())
+	bodyText := strings.Join(strings.Fields(doc.Text()), " ")
+	if match := vicPublicBodyRe.FindStringSubmatch(bodyText); len(match) == 2 {
+		agency = strings.TrimSpace(match[1])
+	}
+	if supplier == "" {
+		if idx := strings.Index(strings.ToLower(bodyText), "supplier information"); idx >= 0 {
+			fragment := strings.TrimSpace(bodyText[idx+len("supplier information"):])
+			fragment = strings.TrimSpace(strings.TrimPrefix(fragment, "1"))
+			for _, marker := range []string{" ACN ", " ABN ", " Powered by "} {
+				if cut := strings.Index(fragment, marker); cut >= 0 {
+					fragment = fragment[:cut]
+					break
+				}
+			}
+			supplier = strings.TrimSpace(fragment)
+		}
+	}
+	return agency, supplier
 }

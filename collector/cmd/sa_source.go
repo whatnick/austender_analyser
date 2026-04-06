@@ -16,6 +16,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
+	"github.com/gocolly/colly/v2"
 	"github.com/shopspring/decimal"
 )
 
@@ -23,6 +24,7 @@ const saSourceID = "sa"
 const saSearchURL = "https://www.tenders.sa.gov.au/contract/search"
 
 var errSaBlocked = errors.New("sa scrape blocked")
+var saPublicAuthorityRe = regexp.MustCompile(`(?i)public authority\s+(.+?)\s+reference #`)
 
 // Chrome-like UA to reduce blocks.
 const saUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -244,6 +246,7 @@ func scrapeSaWindow(ctx context.Context, req SearchRequest, win dateWindow, mu *
 			supplier := get(firstIndex(colIdx, "supplier", "contractor"))
 			startDate := parseSaDate(get(firstIndex(colIdx, "start date", "start")))
 			awardDate := parseSaDate(get(firstIndex(colIdx, "awarded date", "awarded")))
+			detailLink := resolveContractDetailURL(saSearchURL, strings.TrimSpace(tr.Find("a").First().AttrOr("href", "")))
 
 			amount := decimal.Zero
 			if val := get(firstIndex(colIdx, "value", "amount", "cost", "total cost")); val != "" {
@@ -257,6 +260,17 @@ func scrapeSaWindow(ctx context.Context, req SearchRequest, win dateWindow, mu *
 			}
 			if contractID == "" {
 				return
+			}
+			if (buyer == "" || supplier == "") && detailLink != "" && ctx.Err() == nil {
+				detailBuyer, detailSupplier, detailErr := fetchSaDetail(ctx, detailLink)
+				if detailErr == nil {
+					if buyer == "" {
+						buyer = detailBuyer
+					}
+					if supplier == "" {
+						supplier = detailSupplier
+					}
+				}
 			}
 
 			// Heuristic: if supplier/agency are missing from the table but we searched for them,
@@ -499,4 +513,167 @@ func firstIndex(idx map[string]int, keys ...string) int {
 		}
 	}
 	return -1
+}
+
+func resolveContractDetailURL(baseURL, href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		return ""
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return href
+	}
+	ref, err := url.Parse(href)
+	if err != nil {
+		return href
+	}
+	return base.ResolveReference(ref).String()
+}
+
+func fetchSaDetail(ctx context.Context, detailURL string) (string, string, error) {
+	agency, supplier, err := fetchSaDetailWithColly(ctx, detailURL)
+	if err == nil && (agency != "" || supplier != "") {
+		return agency, supplier, nil
+	}
+	return fetchSaDetailWithBrowser(ctx, detailURL)
+}
+
+func fetchSaDetailWithColly(ctx context.Context, detailURL string) (string, string, error) {
+	collector := colly.NewCollector(
+		colly.AllowedDomains("www.tenders.sa.gov.au", "tenders.sa.gov.au"),
+		colly.UserAgent(saUserAgent),
+		colly.AllowURLRevisit(),
+	)
+	collector.SetRequestTimeout(resolveTimeout())
+	collector.OnRequest(func(r *colly.Request) {
+		if ctx.Err() != nil {
+			r.Abort()
+		}
+	})
+
+	var htmlContent string
+	var scrapeErr error
+	done := make(chan struct{})
+	collector.OnError(func(_ *colly.Response, err error) {
+		scrapeErr = err
+	})
+	collector.OnResponse(func(r *colly.Response) {
+		if r != nil {
+			htmlContent = string(r.Body)
+		}
+	})
+	collector.OnScraped(func(_ *colly.Response) {
+		close(done)
+	})
+
+	if err := collector.Visit(detailURL); err != nil {
+		return "", "", err
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
+	if scrapeErr != nil {
+		return "", "", scrapeErr
+	}
+	return parseSaDetailHTML(htmlContent)
+}
+
+func fetchSaDetailWithBrowser(ctx context.Context, detailURL string) (string, string, error) {
+	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.UserAgent(saUserAgent),
+	)
+	bctx, cancelCtx := chromedp.NewContext(allocCtx)
+	defer cancelCtx()
+	defer cancel()
+
+	var htmlContent string
+	if err := chromedp.Run(bctx,
+		chromedp.Navigate(detailURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Sleep(1200*time.Millisecond),
+		chromedp.Evaluate(`document.documentElement ? document.documentElement.outerHTML : ''`, &htmlContent),
+	); err != nil {
+		return "", "", err
+	}
+	return parseSaDetailHTML(htmlContent)
+}
+
+func parseSaDetailHTML(htmlContent string) (string, string, error) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
+	if err != nil {
+		return "", "", err
+	}
+	agency, supplier := parseSaDetailDocument(doc)
+	return agency, supplier, nil
+}
+
+func parseSaDetailDocument(doc *goquery.Document) (string, string) {
+	if doc == nil {
+		return "", ""
+	}
+	agency := ""
+	supplier := strings.TrimSpace(doc.Find(".contractor-details b, .contractor-details .strong").First().Text())
+	apply := func(label, value string) {
+		label = strings.ToLower(strings.TrimSpace(strings.Join(strings.Fields(label), " ")))
+		value = strings.TrimSpace(strings.Join(strings.Fields(value), " "))
+		if value == "" {
+			return
+		}
+		switch {
+		case agency == "" && (strings.Contains(label, "issued by") || strings.Contains(label, "buyer") || strings.Contains(label, "agency")):
+			agency = value
+		case supplier == "" && (strings.Contains(label, "supplier") || strings.Contains(label, "contractor") || strings.Contains(label, "vendor")):
+			supplier = value
+		}
+	}
+
+	doc.Find("table tr").Each(func(_ int, tr *goquery.Selection) {
+		apply(tr.Find("th").First().Text(), tr.Find("td").First().Text())
+	})
+	doc.Find("dl").Each(func(_ int, dl *goquery.Selection) {
+		dts := dl.Find("dt")
+		dds := dl.Find("dd")
+		count := dts.Length()
+		if dds.Length() < count {
+			count = dds.Length()
+		}
+		for i := 0; i < count; i++ {
+			apply(dts.Eq(i).Text(), dds.Eq(i).Text())
+		}
+	})
+	bodyText := strings.Join(strings.Fields(doc.Text()), " ")
+	if agency == "" {
+		if match := saPublicAuthorityRe.FindStringSubmatch(bodyText); len(match) == 2 {
+			agency = strings.TrimSpace(match[1])
+		}
+	}
+	if supplier == "" {
+		lower := strings.ToLower(bodyText)
+		for _, heading := range []string{"registered contractors", "unregistered contractors"} {
+			idx := strings.Index(lower, heading)
+			if idx < 0 {
+				continue
+			}
+			fragment := strings.TrimSpace(bodyText[idx+len(heading):])
+			fragment = strings.TrimSpace(strings.TrimPrefix(fragment, "1"))
+			for _, marker := range []string{" Created:", " Modified:", " Acknowledgement of Country", " Feedback and support"} {
+				if cut := strings.Index(fragment, marker); cut >= 0 {
+					fragment = fragment[:cut]
+					break
+				}
+			}
+			supplier = strings.TrimSpace(fragment)
+			if supplier != "" {
+				break
+			}
+		}
+	}
+	return agency, supplier
 }

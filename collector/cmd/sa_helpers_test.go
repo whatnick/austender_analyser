@@ -38,3 +38,22 @@ func TestFindSaResultsTable(t *testing.T) {
 	require.Contains(t, idx, "contract")
 	require.Contains(t, idx, "buyer")
 }
+
+func TestParseSaDetailDocument(t *testing.T) {
+	html := `
+	<table>
+	  <tr><th>Issued By</th><td>Department for Infrastructure and Transport</td></tr>
+	  <tr><th>Supplier</th><td>Acme Civil Pty Ltd</td></tr>
+	</table>`
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	require.NoError(t, err)
+
+	agency, supplier := parseSaDetailDocument(doc)
+	require.Equal(t, "Department for Infrastructure and Transport", agency)
+	require.Equal(t, "Acme Civil Pty Ltd", supplier)
+}
+
+func TestResolveContractDetailURL(t *testing.T) {
+	resolved := resolveContractDetailURL(saSearchURL, "/contract/view?id=12345")
+	require.Equal(t, "https://www.tenders.sa.gov.au/contract/view?id=12345", resolved)
+}
