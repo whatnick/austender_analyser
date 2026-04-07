@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -47,4 +49,41 @@ func TestBuildVicSearchURL(t *testing.T) {
 	require.Contains(t, url, "orderBy=startDate")
 	require.Contains(t, url, "browse=false")
 	require.Contains(t, url, "page=")
+}
+
+func TestVicRunBrowserFallbackPreservesMonthWindows(t *testing.T) {
+	t.Setenv("VIC_USE_BROWSER", "true")
+	original := runVicWithBrowserFunc
+	defer func() {
+		runVicWithBrowserFunc = original
+	}()
+
+	var capturedReq SearchRequest
+	var capturedWindows []dateWindow
+	runVicWithBrowserFunc = func(ctx context.Context, req SearchRequest, windows []dateWindow) (string, error) {
+		capturedReq = req
+		capturedWindows = append([]dateWindow(nil), windows...)
+		return "$0.00", nil
+	}
+
+	start := time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, time.March, 20, 0, 0, 0, 0, time.UTC)
+
+	res, err := newVicSource().Run(context.Background(), SearchRequest{
+		Source:    vicSourceID,
+		StartDate: start,
+		EndDate:   end,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "$0.00", res)
+	require.Equal(t, start, capturedReq.StartDate)
+	require.Equal(t, end, capturedReq.EndDate)
+	require.Len(t, capturedWindows, 3)
+	require.Equal(t, time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC), capturedWindows[0].start)
+	require.Equal(t, time.Date(2024, time.January, 31, 0, 0, 0, 0, time.UTC), capturedWindows[0].end)
+	require.Equal(t, time.Date(2024, time.February, 1, 0, 0, 0, 0, time.UTC), capturedWindows[1].start)
+	require.Equal(t, time.Date(2024, time.February, 29, 0, 0, 0, 0, time.UTC), capturedWindows[1].end)
+	require.Equal(t, time.Date(2024, time.March, 1, 0, 0, 0, 0, time.UTC), capturedWindows[2].start)
+	require.Equal(t, time.Date(2024, time.March, 20, 0, 0, 0, 0, time.UTC), capturedWindows[2].end)
+	_, _ = os.LookupEnv("VIC_USE_BROWSER")
 }

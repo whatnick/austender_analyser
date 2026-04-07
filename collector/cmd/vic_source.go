@@ -29,6 +29,8 @@ var errVicForbidden = errors.New("vic scrape forbidden")
 
 var vicPublicBodyRe = regexp.MustCompile(`(?i)public body\s+(.+?)\s+contract number`)
 
+var runVicWithBrowserFunc = runVicWithBrowser
+
 // Chrome-like UA to reduce blocks.
 const vicUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -50,14 +52,13 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	req.StartDate = startResolved
 	req.EndDate = endResolved
 
-	fullTarget := buildVicSearchURL(req)
-	if strings.EqualFold(os.Getenv("VIC_USE_BROWSER"), "true") {
-		return runVicWithBrowser(ctx, fullTarget, req)
-	}
-
 	windows := splitDateWindowsByMonth(startResolved, endResolved)
 	if len(windows) == 0 {
 		return formatMoneyDecimal(decimal.Zero), nil
+	}
+
+	if strings.EqualFold(os.Getenv("VIC_USE_BROWSER"), "true") {
+		return runVicWithBrowserFunc(ctx, req, windows)
 	}
 
 	maxConc := resolveMaxConcurrency()
@@ -124,10 +125,10 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 
 	if firstErr != nil {
 		if errors.Is(firstErr, context.Canceled) && parentCtx.Err() == nil {
-			return runVicWithBrowser(parentCtx, fullTarget, req)
+			return runVicWithBrowserFunc(parentCtx, req, windows)
 		}
 		if errors.Is(firstErr, errVicForbidden) || strings.Contains(strings.ToLower(firstErr.Error()), "forbidden") {
-			return runVicWithBrowser(parentCtx, fullTarget, req)
+			return runVicWithBrowserFunc(parentCtx, req, windows)
 		}
 		return "", firstErr
 	}
@@ -135,7 +136,7 @@ func (v vicSource) Run(ctx context.Context, req SearchRequest) (string, error) {
 	if observedRows.Load() == 0 && ctx.Err() == nil {
 		// The VIC search page is frequently rendered client-side. In those cases Colly sees an empty
 		// table despite a 200 response. If we didn't observe any result rows, retry with headless Chrome.
-		return runVicWithBrowser(ctx, fullTarget, req)
+		return runVicWithBrowserFunc(ctx, req, windows)
 	}
 
 	return formatMoneyDecimal(total), nil
@@ -387,7 +388,14 @@ func parseVicAmount(raw string) decimal.Decimal {
 }
 
 //go:nocover
-func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (string, error) {
+func runVicWithBrowser(ctx context.Context, req SearchRequest, windows []dateWindow) (string, error) {
+	if len(windows) == 0 {
+		windows = splitDateWindowsByMonth(req.StartDate, req.EndDate)
+	}
+	if len(windows) == 0 {
+		return formatMoneyDecimal(decimal.Zero), nil
+	}
+
 	// Headless Chrome fallback for anti-bot protections.
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
 		chromedp.Flag("headless", true),
@@ -398,20 +406,50 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 	defer cancelCtx()
 	defer cancel()
 
+	total := decimal.Zero
+	seen := make(map[string]struct{})
+	completed := 0
+	for _, win := range windows {
+		if req.ShouldFetchWindow != nil && !req.ShouldFetchWindow(win) {
+			completed++
+			if req.OnProgress != nil {
+				req.OnProgress(completed, len(windows))
+			}
+			continue
+		}
+		windowReq := req
+		windowReq.StartDate = win.start
+		windowReq.EndDate = win.end
+
+		windowTotal, err := scrapeVicWindowWithBrowser(ctx, buildVicSearchURL(windowReq), windowReq, seen)
+		if err != nil {
+			return "", err
+		}
+		total = total.Add(windowTotal)
+		completed++
+		if req.OnProgress != nil {
+			req.OnProgress(completed, len(windows))
+		}
+	}
+
+	ac := accounting.Accounting{Symbol: "$", Precision: 2}
+	return ac.FormatMoney(total), nil
+}
+
+func scrapeVicWindowWithBrowser(ctx context.Context, target string, req SearchRequest, seen map[string]struct{}) (decimal.Decimal, error) {
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(target),
 		chromedp.WaitVisible(`table`, chromedp.ByQuery),
 	); err != nil {
-		return "", err
+		return decimal.Zero, err
 	}
 
 	// The results table is often populated asynchronously.
 	if err := waitForVicResultRows(ctx, 10*time.Second); err != nil {
-		return "", err
+		return decimal.Zero, err
 	}
 
-	total := decimal.Zero
-	seen := make(map[string]struct{})
+	windowTotal := decimal.Zero
 	const maxPages = 50
 
 	for page := 0; page < maxPages; page++ {
@@ -419,15 +457,15 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 		if err := chromedp.Run(ctx,
 			chromedp.WaitVisible(`table`, chromedp.ByQuery),
 		); err != nil {
-			return "", err
+			return decimal.Zero, err
 		}
 		if err := readVicPageHTML(ctx, &pageHTML); err != nil {
-			return "", err
+			return decimal.Zero, err
 		}
 
 		doc, err := goquery.NewDocumentFromReader(strings.NewReader(pageHTML))
 		if err != nil {
-			return "", err
+			return decimal.Zero, err
 		}
 
 		resultsTable := doc.Find("table").FilterFunction(func(_ int, s *goquery.Selection) bool {
@@ -526,7 +564,7 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 				if req.OnMatch != nil {
 					req.OnMatch(summary)
 				}
-				total = total.Add(summary.Amount)
+				windowTotal = windowTotal.Add(summary.Amount)
 			}
 		})
 
@@ -537,7 +575,7 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 				&nextHref,
 			),
 		); err != nil {
-			return "", err
+			return decimal.Zero, err
 		}
 		nextHref = strings.TrimSpace(nextHref)
 		if nextHref == "" {
@@ -556,15 +594,14 @@ func runVicWithBrowser(ctx context.Context, target string, req SearchRequest) (s
 			chromedp.Navigate(resolved.String()),
 			chromedp.WaitVisible(`table`, chromedp.ByQuery),
 		); err != nil {
-			return "", err
+			return decimal.Zero, err
 		}
 		if err := waitForVicResultRows(ctx, 10*time.Second); err != nil {
-			return "", err
+			return decimal.Zero, err
 		}
 	}
 
-	ac := accounting.Accounting{Symbol: "$", Precision: 2}
-	return ac.FormatMoney(total), nil
+	return windowTotal, nil
 }
 
 func waitForVicResultRows(ctx context.Context, timeout time.Duration) error {

@@ -117,7 +117,17 @@ func (i *columnarIndex) saveLocked() error {
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, i.path)
+	if err := os.Rename(tmpPath, i.path); err == nil {
+		return nil
+	}
+
+	// Some mounted filesystems (notably WSL 9p-backed mounts) can fail when renaming
+	// over an existing file even though the temp file was written successfully.
+	if err := os.WriteFile(i.path, data, 0o644); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Remove(tmpPath)
 }
 
 func (i *columnarIndex) replaceFiles(files []columnarFileMeta) error {
