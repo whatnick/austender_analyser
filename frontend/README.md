@@ -11,6 +11,7 @@ Static HTMX chat UI that talks to `/api/llm` and demonstrates MCP tool wiring.
 
 ## Configuration
 - `config.local.js` sets `apiBase` and optional `mcpConfig` (default points to `/api/mcp`). Adjust for deployed environments.
+- `../mcp.local.json` includes local Austender, Puppeteer, and GoDevMCP entries; install GoDevMCP with `go install github.com/fpt/go-dev-mcp/godevmcp@latest` before using that server.
 - Requests are simple JSON: `{ "prompt": "...", "mcpConfig": { ... } }`.
 
 ## Styling/behavior

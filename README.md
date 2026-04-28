@@ -65,6 +65,7 @@ Prerequisites: Go 1.25+, a browser, and optionally [Task](https://taskfile.dev/#
 ### Frontend Notes
 - Open `frontend/index.html` directly or via `task run:frontend`
 - Toggle **Enable MCP backend** to pass the config from `frontend/config.local.js`
+- `mcp.local.json` includes local Austender, Puppeteer, and GoDevMCP entries; install GoDevMCP with `go install github.com/fpt/go-dev-mcp/godevmcp@latest`
 - Status banner reflects detected backend (`openai` vs `ollama`) and surfaces model picker when Ollama is reachable
 
 ## Testing & Coverage

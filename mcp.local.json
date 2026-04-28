@@ -8,6 +8,16 @@
         "description": "Local Austender MCP server exposing aggregate_contracts and proxy_ocds tools"
       }
     },
+    "go-dev-mcp": {
+      "transport": "stdio",
+      "command": "godevmcp",
+      "args": [
+        "serve"
+      ],
+      "metadata": {
+        "description": "GoDevMCP server for Go code analysis, navigation, documentation lookup, and validation; install with `go install github.com/fpt/go-dev-mcp/godevmcp@latest`"
+      }
+    },
     "puppeteer": {
       "transport": "stdio",
       "command": "npx",
